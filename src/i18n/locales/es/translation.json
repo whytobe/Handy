@@ -19,7 +19,8 @@
     "postProcessing": "Post proceso",
     "history": "Historial",
     "debug": "Depuración",
-    "about": "Acerca de"
+    "about": "Acerca de",
+    "transform": "Text Transform"
   },
   "onboarding": {
     "customModelDescription": "Sin soporte oficial",
@@ -348,6 +349,10 @@
           "transcribe_with_post_process": {
             "name": "Tecla de post procesamiento",
             "description": "Opcional: Una tecla de acceso rápido dedicada que siempre aplica post procesamiento con IA a tu transcripción."
+          },
+          "transform_text": {
+            "name": "Transform Text Shortcut",
+            "description": "Transform selected text using your voice, or format dictation to match the active app."
           }
         },
         "errors": {
@@ -666,6 +671,16 @@
           "placeholderWithOptions": "Buscar o seleccionar un modelo",
           "placeholderNoOptions": "Escribe un nombre de modelo",
           "refreshModels": "Actualizar modelos"
+        },
+        "test": {
+          "title": "Probar modelo",
+          "description": "Envía una breve solicitud de prueba para verificar que el proveedor y el modelo responden.",
+          "button": "Probar",
+          "testing": "Probando...",
+          "success": "Conectado con {{model}} ({{latency}} ms)",
+          "failed": "La prueba del modelo falló",
+          "missingModel": "Introduce o selecciona un nombre de modelo antes de probar.",
+          "fetchModelsFailed": "No se pudo obtener la lista de modelos"
         }
       },
       "prompts": {
@@ -898,6 +913,91 @@
           "details": "El habla a texto local de Handy está construido sobre transcribe.cpp y ggml. Gracias al increíble trabajo de Georgi Gerganov y colaboradores."
         }
       }
+    },
+    "transform": {
+      "title": "Text Transform",
+      "enable": {
+        "label": "Enable Text Transform",
+        "description": "Use a dedicated shortcut to rewrite selected text by voice or style dictation for the active app"
+      },
+      "mode": {
+        "title": "Transform Mode",
+        "description": "Choose how the Text Transform shortcut behaves when triggered.",
+        "options": {
+          "smart": "Smart (Selection + Auto-Style)",
+          "command": "Command Only (Rewrite Selection)",
+          "autoStyle": "Auto-Style Only (Dictate by App)"
+        },
+        "descriptions": {
+          "smart": "If text is selected, your voice acts as a command to transform it. Otherwise, your speech is formatted for the active app.",
+          "command": "Always capture selected text and transform it using your spoken instruction.",
+          "autoStyle": "Always dictate and format text using the matching app style rule."
+        }
+      },
+      "clipboardFallback": {
+        "label": "Clipboard Fallback (Cmd+C)",
+        "description": "Briefly copy the selection when an app does not expose selected text via macOS Accessibility, then restore your clipboard"
+      },
+      "macosOnlyNotice": "Selected-text capture and running-app detection currently work on macOS. On this platform, Auto-Style falls back to your default prompt.",
+      "prompts": {
+        "title": "Transform Prompts",
+        "selectedPrompt": {
+          "title": "Command Transform Prompt",
+          "description": "Template used when transforming selected text with a spoken instruction. Supports ${text}, ${instruction}, and ${app}."
+        },
+        "defaultDictationPrompt": {
+          "title": "Fallback Dictation Style",
+          "description": "Style used in Smart or Auto-Style dictation when no App Style Rule matches the current app.",
+          "usePostProcessing": "Use Post-Processing Prompt"
+        },
+        "noPrompts": "No prompts available",
+        "selectPrompt": "Select a prompt",
+        "createNew": "Create New Prompt",
+        "promptLabel": "Prompt Label",
+        "promptLabelPlaceholder": "Enter prompt name",
+        "promptInstructions": "Prompt Instructions",
+        "promptInstructionsPlaceholder": "Write instructions for transforming text or styling dictation...",
+        "promptTip": "Tip: Use <code>${text}</code> for selected text, <code>${instruction}</code> or <code>${output}</code> for your speech, and <code>${app}</code> for the active app.",
+        "updatePrompt": "Update Prompt",
+        "deletePrompt": "Delete Prompt",
+        "createPrompt": "Create Prompt",
+        "cancel": "Cancel",
+        "selectToEdit": "Select a prompt above to view and edit its details.",
+        "createFirst": "Click 'Create New Prompt' above to create your first transform prompt.",
+        "shortcuts": {
+          "title": "Atajos de prompts",
+          "description": "Asigna atajos dedicados opcionales a cada prompt. Al pulsar el atajo de un prompt, la transformación de texto se ejecutará siempre con ese prompt.",
+          "setShortcut": "Definir atajo",
+          "clearShortcut": "Borrar atajo de {{prompt}}",
+          "enableHint": "Activa la transformación de texto arriba para usar estos atajos.",
+          "behaviorInstant": "Instantáneo",
+          "behaviorVoice": "Comando de voz",
+          "behaviorInstantTooltip": "Cuando hay texto seleccionado, lo transforma al instante con este prompt sin abrir el micrófono.",
+          "behaviorVoiceTooltip": "Cuando hay texto seleccionado, abre el micrófono para que dictes cómo modificarlo."
+        }
+      },
+      "appRules": {
+        "title": "App Style Rules",
+        "description": "Automatically pick a formatting style based on which application is active.",
+        "addRule": "Add App Rule",
+        "empty": "No app rules configured yet. Add one to apply app-specific formatting styles.",
+        "pickRunningApp": "Pick Running App",
+        "pickRunningAppPlaceholder": "Select a running app (optional)...",
+        "refreshApps": "Refresh running apps",
+        "appName": "Application Name",
+        "appNamePlaceholder": "e.g. Slack",
+        "appIdentifier": "Bundle ID or App Keyword",
+        "appIdentifierPlaceholder": "e.g. com.tinyspeck.slackmacgap",
+        "stylePrompt": "Style Prompt",
+        "saveRule": "Save Rule",
+        "deleteRule": "Delete rule for {{app}}",
+        "toggleRule": "Enable rule for {{app}}",
+        "cancel": "Cancel"
+      },
+      "provider": {
+        "title": "AI Provider",
+        "sharedNote": "Text Transform shares your AI provider, API key, and model with Post Processing."
+      }
     }
   },
   "footer": {
@@ -957,7 +1057,11 @@
     "filePostProcessFailedTitle": "Transcrito sin post proceso",
     "filePostProcessFailed": "El post proceso no terminó, así que la transcripción se guardó tal cual.",
     "fileTranscriptionFailedTitle": "Error al transcribir el archivo",
-    "transcriptionFailedTitle": "Error de transcripción"
+    "transcriptionFailedTitle": "Error de transcripción",
+    "noSelectedTextTitle": "No Text Selected",
+    "noSelectedText": "Highlight some text before using Command mode, or switch to Smart mode.",
+    "transformFailedTitle": "Transform Failed",
+    "transformFailed": "Text transform didn't finish, so your selected text was left unchanged."
   },
   "notices": {
     "errorOne": "{{n}} error",

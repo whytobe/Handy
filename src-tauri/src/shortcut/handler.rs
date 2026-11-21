@@ -7,7 +7,7 @@ use log::warn;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
-use crate::actions::ACTION_MAP;
+use crate::actions::get_action;
 use crate::managers::audio::AudioRecordingManager;
 use crate::settings::get_settings;
 use crate::transcription_coordinator::is_transcribe_binding;
@@ -50,7 +50,7 @@ pub fn handle_shortcut_event(
         return;
     }
 
-    let Some(action) = ACTION_MAP.get(binding_id) else {
+    let Some(action) = get_action(binding_id) else {
         warn!(
             "No action defined in ACTION_MAP for shortcut ID '{}'. Shortcut: '{}', Pressed: {}",
             binding_id, hotkey_string, is_pressed
@@ -58,10 +58,12 @@ pub fn handle_shortcut_event(
         return;
     };
 
-    // Cancel binding: only fires when recording and key is pressed
+    // Cancel binding: fires when recording or an instant transform is active
     if binding_id == "cancel" {
         let audio_manager = app.state::<Arc<AudioRecordingManager>>();
-        if audio_manager.is_recording() && is_pressed {
+        if (audio_manager.is_recording() || crate::actions::is_instant_transform_active())
+            && is_pressed
+        {
             action.start(app, binding_id, hotkey_string);
         }
         return;

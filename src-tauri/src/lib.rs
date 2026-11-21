@@ -9,6 +9,7 @@ mod chinese_script;
 pub mod cli;
 mod clipboard;
 mod commands;
+mod context;
 pub mod engine_supervisor;
 mod helpers;
 mod input;
@@ -726,10 +727,25 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_post_process_model_setting,
             shortcut::set_post_process_provider,
             shortcut::fetch_post_process_models,
+            shortcut::test_post_process_model,
             shortcut::add_post_process_prompt,
             shortcut::update_post_process_prompt,
             shortcut::delete_post_process_prompt,
             shortcut::set_post_process_selected_prompt,
+            shortcut::change_transform_enabled_setting,
+            shortcut::change_transform_mode_setting,
+            shortcut::change_transform_clipboard_fallback_setting,
+            shortcut::set_transform_selected_prompt,
+            shortcut::set_transform_default_dictation_prompt,
+            shortcut::add_transform_prompt,
+            shortcut::update_transform_prompt,
+            shortcut::delete_transform_prompt,
+            shortcut::clear_transform_prompt_binding,
+            shortcut::set_transform_prompt_selection_behavior,
+            shortcut::add_transform_app_rule,
+            shortcut::update_transform_app_rule,
+            shortcut::delete_transform_app_rule,
+            shortcut::get_running_applications,
             shortcut::update_custom_words,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,
@@ -834,12 +850,18 @@ pub fn run(cli_args: CliArgs) {
         ]);
 
     #[cfg(debug_assertions)] // <- Only export on non-release builds
-    specta_builder
-        .export(
-            Typescript::default().bigint(BigIntExportBehavior::Number),
-            "../src/bindings.ts",
-        )
-        .expect("Failed to export typescript bindings");
+    {
+        let bindings_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings.ts");
+        if bindings_path.parent().is_some_and(|dir| dir.is_dir()) {
+            specta_builder
+                .export(
+                    Typescript::default().bigint(BigIntExportBehavior::Number),
+                    bindings_path,
+                )
+                .expect("Failed to export typescript bindings");
+        }
+    }
 
     let invoke_handler = specta_builder.invoke_handler();
 
@@ -916,6 +938,8 @@ pub fn run(cli_args: CliArgs) {
                 signal_handle::send_transcription_input(app, "transcribe", "CLI");
             } else if args.iter().any(|a| a == "--toggle-post-process") {
                 signal_handle::send_transcription_input(app, "transcribe_with_post_process", "CLI");
+            } else if args.iter().any(|a| a == "--toggle-transform") {
+                signal_handle::send_transcription_input(app, "transform_text", "CLI");
             } else if args.iter().any(|a| a == "--cancel") {
                 crate::utils::cancel_current_operation(app);
             } else {

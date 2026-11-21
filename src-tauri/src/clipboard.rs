@@ -897,9 +897,173 @@ fn sends_keys(paste_method: PasteMethod) -> bool {
     }
 }
 
+/// Options controlling post-paste behavior.
+#[derive(Clone, Copy, Debug)]
+pub struct PasteOptions {
+    pub allow_trailing_space: bool,
+    pub allow_auto_submit: bool,
+}
+
+impl Default for PasteOptions {
+    fn default() -> Self {
+        Self {
+            allow_trailing_space: true,
+            allow_auto_submit: true,
+        }
+    }
+}
+
+/// Captures the currently selected text in the frontmost macOS application by
+/// synthesizing `Cmd+C`, reading the pasteboard if its `changeCount` advances,
+/// and restoring the user's previous clipboard contents afterward.
+#[cfg(target_os = "macos")]
+pub(crate) fn copy_selection_via_clipboard(app_handle: &AppHandle) -> Option<String> {
+    use objc2_app_kit::NSPasteboard;
+    use std::ffi::c_void;
+    use std::time::Instant;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceCreate(state_id: i32) -> *mut c_void;
+        fn CGEventCreateKeyboardEvent(
+            source: *const c_void,
+            virtual_key: u16,
+            key_down: bool,
+        ) -> *mut c_void;
+        fn CGEventSetFlags(event: *mut c_void, flags: u64);
+        fn CGEventPost(tap: u32, event: *mut c_void);
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    // Use an isolated private event source and post at the session tap so physical
+    // modifiers held by the user for the transform hotkey (e.g. Option) don't bleed into Cmd+C.
+    const K_CG_EVENT_SOURCE_STATE_PRIVATE: i32 = -1;
+    const K_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
+    const K_CG_SESSION_EVENT_TAP: u32 = 1;
+
+    struct ClipboardSnapshot {
+        initial_change_count: objc2_foundation::NSInteger,
+        saved_text: Option<String>,
+        saved_image: Option<tauri::image::Image<'static>>,
+    }
+
+    let _paste = PASTE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let app = app_handle.clone();
+    if let Err(e) = app_handle.run_on_main_thread(move || {
+        crate::paste_tx::flush_pending_macos(&app);
+
+        let initial_change_count = NSPasteboard::generalPasteboard().changeCount();
+        let clipboard = app.clipboard();
+        let saved_text = clipboard.read_text().ok().filter(|t| !t.is_empty());
+        let saved_image = if saved_text.is_none() {
+            clipboard.read_image().ok().map(|image| image.to_owned())
+        } else {
+            None
+        };
+
+        let keycode = crate::input::command_c_keycode();
+        let mut posted = false;
+        unsafe {
+            let source = CGEventSourceCreate(K_CG_EVENT_SOURCE_STATE_PRIVATE);
+            let down = CGEventCreateKeyboardEvent(source, keycode, true);
+            if !down.is_null() {
+                CGEventSetFlags(down, K_CG_EVENT_FLAG_MASK_COMMAND);
+                CGEventPost(K_CG_SESSION_EVENT_TAP, down);
+                CFRelease(down);
+                let up = CGEventCreateKeyboardEvent(source, keycode, false);
+                if !up.is_null() {
+                    CGEventSetFlags(up, K_CG_EVENT_FLAG_MASK_COMMAND);
+                    CGEventPost(K_CG_SESSION_EVENT_TAP, up);
+                    CFRelease(up);
+                    posted = true;
+                }
+            }
+            if !source.is_null() {
+                CFRelease(source);
+            }
+        }
+
+        let _ = tx.send(if posted {
+            Some(ClipboardSnapshot {
+                initial_change_count,
+                saved_text,
+                saved_image,
+            })
+        } else {
+            None
+        });
+    }) {
+        log::warn!("Failed to dispatch Cmd+C selection copy to main thread: {e}");
+        return None;
+    }
+
+    let snapshot = match rx.recv() {
+        Ok(Some(snapshot)) => snapshot,
+        _ => return None,
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(180);
+    let mut changed = false;
+    while Instant::now() < deadline {
+        if NSPasteboard::generalPasteboard().changeCount() != snapshot.initial_change_count {
+            changed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    if !changed {
+        return None;
+    }
+
+    let copied = app_handle.clipboard().read_text().ok();
+    let after_copy_count = NSPasteboard::generalPasteboard().changeCount();
+
+    let (restore_tx, restore_rx) = mpsc::sync_channel(1);
+    let app = app_handle.clone();
+    let saved_text = snapshot.saved_text;
+    let saved_image = snapshot.saved_image;
+    if app_handle
+        .run_on_main_thread(move || {
+            if NSPasteboard::generalPasteboard().changeCount() == after_copy_count {
+                let clipboard = app.clipboard();
+                if let Some(text) = saved_text {
+                    let _ = clipboard.write_text(&text);
+                } else if let Some(image) = saved_image {
+                    let _ = clipboard.write_image(&image);
+                } else {
+                    let _ = clipboard.clear();
+                }
+            }
+            let _ = restore_tx.send(());
+        })
+        .is_ok()
+    {
+        let _ = restore_rx.recv();
+    }
+
+    copied.filter(|s| !s.trim().is_empty())
+}
+
 /// Pastes `text` into the focused app. Call from a worker thread, never the main
 /// thread: it sleeps between steps (input injection hops via `with_enigo`).
 pub fn paste(text: String, app_handle: AppHandle) -> Result<PasteOutcome, String> {
+    paste_with_options(text, app_handle, PasteOptions::default())
+}
+
+/// Pastes `text` into the focused app with explicit control over trailing space
+/// and auto-submit behavior.
+pub fn paste_with_options(
+    text: String,
+    app_handle: AppHandle,
+    options: PasteOptions,
+) -> Result<PasteOutcome, String> {
     let _paste = PASTE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let settings = get_settings(&app_handle);
 
@@ -908,7 +1072,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<PasteOutcome, String
     // paste still runs as usual; only what Handy reports changes.
     let blocked =
         sends_keys(settings.paste_method) && crate::utils::foreground_window_is_elevated();
-    let result = paste_as_configured(text, app_handle, settings);
+    let result = paste_as_configured(text, app_handle, settings, options);
     if !blocked {
         return result.map(|()| PasteOutcome::Pasted);
     }
@@ -922,13 +1086,14 @@ fn paste_as_configured(
     text: String,
     app_handle: AppHandle,
     settings: AppSettings,
+    options: PasteOptions,
 ) -> Result<(), String> {
     let paste_method = settings.paste_method;
     let paste_delay_ms = settings.paste_delay_ms;
     let paste_delay_after_ms = settings.paste_delay_after_ms;
 
-    // Append trailing space if setting is enabled
-    let text = if settings.append_trailing_space {
+    // Append trailing space if setting is enabled and allowed for this action
+    let text = if options.allow_trailing_space && settings.append_trailing_space {
         format!("{} ", text)
     } else {
         text
@@ -963,7 +1128,7 @@ fn paste_as_configured(
                 // Runs entirely on the main thread, as it requires.
                 let (text, app) = (text.clone(), app_handle.clone());
                 let (auto_submit, auto_submit_key, clipboard_handling) = (
-                    settings.auto_submit,
+                    options.allow_auto_submit && settings.auto_submit,
                     settings.auto_submit_key,
                     settings.clipboard_handling,
                 );
@@ -1003,7 +1168,7 @@ fn paste_as_configured(
         }
     }
 
-    if should_send_auto_submit(settings.auto_submit, paste_method) {
+    if options.allow_auto_submit && should_send_auto_submit(settings.auto_submit, paste_method) {
         std::thread::sleep(Duration::from_millis(50));
         let auto_submit_key = settings.auto_submit_key;
         if let Err(error) = with_enigo(&app_handle, move |enigo| {

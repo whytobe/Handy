@@ -51,6 +51,14 @@ const NOTICE_DISPLAY: Record<NoticeCode, NoticeDisplay> = {
     title: "errors.postProcessFailedTitle",
     explanation: (t) => t("errors.postProcessFailed"),
   },
+  NoSelectedText: {
+    title: "errors.noSelectedTextTitle",
+    explanation: (t) => t("errors.noSelectedText"),
+  },
+  TransformFailed: {
+    title: "errors.transformFailedTitle",
+    explanation: (t) => t("errors.transformFailed"),
+  },
   FileTranscriptionFailed: {
     title: "errors.fileTranscriptionFailedTitle",
   },

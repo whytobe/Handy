@@ -19,7 +19,8 @@
     "postProcessing": "후처리",
     "history": "히스토리",
     "debug": "디버그",
-    "about": "정보"
+    "about": "정보",
+    "transform": "Text Transform"
   },
   "onboarding": {
     "customModelDescription": "공식 지원되지 않음",
@@ -348,6 +349,10 @@
           "transcribe_with_post_process": {
             "name": "후처리 단축키",
             "description": "선택 사항: 항상 AI 후처리를 적용하는 전용 단축키입니다."
+          },
+          "transform_text": {
+            "name": "Transform Text Shortcut",
+            "description": "Transform selected text using your voice, or format dictation to match the active app."
           }
         },
         "errors": {
@@ -666,6 +671,16 @@
           "placeholderWithOptions": "모델 검색 또는 선택",
           "placeholderNoOptions": "모델 이름 입력",
           "refreshModels": "모델 새로고침"
+        },
+        "test": {
+          "title": "연결 테스트",
+          "description": "공급자와 모델이 응답하는지 확인하기 위해 짧은 테스트 요청을 보냅니다.",
+          "button": "테스트",
+          "testing": "테스트 중...",
+          "success": "{{model}}에 연결됨 ({{latency}} ms)",
+          "failed": "모델 테스트에 실패했습니다",
+          "missingModel": "테스트하기 전에 모델 이름을 입력하거나 선택하세요.",
+          "fetchModelsFailed": "모델 목록을 가져오지 못했습니다"
         }
       },
       "prompts": {
@@ -898,6 +913,91 @@
           "details": "Handy는 빠르고 로컬 음성-텍스트 처리를 위해 ggml를 사용합니다. Georgi Gerganov와 기여자들의 놀라운 작업에 감사드립니다."
         }
       }
+    },
+    "transform": {
+      "title": "Text Transform",
+      "enable": {
+        "label": "Enable Text Transform",
+        "description": "Use a dedicated shortcut to rewrite selected text by voice or style dictation for the active app"
+      },
+      "mode": {
+        "title": "Transform Mode",
+        "description": "Choose how the Text Transform shortcut behaves when triggered.",
+        "options": {
+          "smart": "Smart (Selection + Auto-Style)",
+          "command": "Command Only (Rewrite Selection)",
+          "autoStyle": "Auto-Style Only (Dictate by App)"
+        },
+        "descriptions": {
+          "smart": "If text is selected, your voice acts as a command to transform it. Otherwise, your speech is formatted for the active app.",
+          "command": "Always capture selected text and transform it using your spoken instruction.",
+          "autoStyle": "Always dictate and format text using the matching app style rule."
+        }
+      },
+      "clipboardFallback": {
+        "label": "Clipboard Fallback (Cmd+C)",
+        "description": "Briefly copy the selection when an app does not expose selected text via macOS Accessibility, then restore your clipboard"
+      },
+      "macosOnlyNotice": "Selected-text capture and running-app detection currently work on macOS. On this platform, Auto-Style falls back to your default prompt.",
+      "prompts": {
+        "title": "Transform Prompts",
+        "selectedPrompt": {
+          "title": "Command Transform Prompt",
+          "description": "Template used when transforming selected text with a spoken instruction. Supports ${text}, ${instruction}, and ${app}."
+        },
+        "defaultDictationPrompt": {
+          "title": "Fallback Dictation Style",
+          "description": "Style used in Smart or Auto-Style dictation when no App Style Rule matches the current app.",
+          "usePostProcessing": "Use Post-Processing Prompt"
+        },
+        "noPrompts": "No prompts available",
+        "selectPrompt": "Select a prompt",
+        "createNew": "Create New Prompt",
+        "promptLabel": "Prompt Label",
+        "promptLabelPlaceholder": "Enter prompt name",
+        "promptInstructions": "Prompt Instructions",
+        "promptInstructionsPlaceholder": "Write instructions for transforming text or styling dictation...",
+        "promptTip": "Tip: Use <code>${text}</code> for selected text, <code>${instruction}</code> or <code>${output}</code> for your speech, and <code>${app}</code> for the active app.",
+        "updatePrompt": "Update Prompt",
+        "deletePrompt": "Delete Prompt",
+        "createPrompt": "Create Prompt",
+        "cancel": "Cancel",
+        "selectToEdit": "Select a prompt above to view and edit its details.",
+        "createFirst": "Click 'Create New Prompt' above to create your first transform prompt.",
+        "shortcuts": {
+          "title": "프롬프트 단축키",
+          "description": "개별 프롬프트에 전용 단축키를 선택적으로 지정합니다. 프롬프트 단축키를 누르면 항상 해당 프롬프트로 텍스트 변환이 실행됩니다.",
+          "setShortcut": "단축키 설정",
+          "clearShortcut": "{{prompt}} 단축키 지우기",
+          "enableHint": "이 단축키를 사용하려면 위에서 텍스트 변환을 활성화하세요.",
+          "behaviorInstant": "즉시 변환",
+          "behaviorVoice": "음성 명령",
+          "behaviorInstantTooltip": "텍스트가 선택되어 있을 때 마이크를 켜지 않고 이 프롬프트로 즉시 변환합니다.",
+          "behaviorVoiceTooltip": "텍스트가 선택되어 있을 때 마이크를 열어 변경 지시를 말할 수 있습니다."
+        }
+      },
+      "appRules": {
+        "title": "App Style Rules",
+        "description": "Automatically pick a formatting style based on which application is active.",
+        "addRule": "Add App Rule",
+        "empty": "No app rules configured yet. Add one to apply app-specific formatting styles.",
+        "pickRunningApp": "Pick Running App",
+        "pickRunningAppPlaceholder": "Select a running app (optional)...",
+        "refreshApps": "Refresh running apps",
+        "appName": "Application Name",
+        "appNamePlaceholder": "e.g. Slack",
+        "appIdentifier": "Bundle ID or App Keyword",
+        "appIdentifierPlaceholder": "e.g. com.tinyspeck.slackmacgap",
+        "stylePrompt": "Style Prompt",
+        "saveRule": "Save Rule",
+        "deleteRule": "Delete rule for {{app}}",
+        "toggleRule": "Enable rule for {{app}}",
+        "cancel": "Cancel"
+      },
+      "provider": {
+        "title": "AI Provider",
+        "sharedNote": "Text Transform shares your AI provider, API key, and model with Post Processing."
+      }
     }
   },
   "footer": {
@@ -957,7 +1057,11 @@
     "filePostProcessFailedTitle": "후처리 없이 받아씀",
     "filePostProcessFailed": "후처리가 완료되지 않아 받아쓰기 결과를 그대로 저장했습니다.",
     "fileTranscriptionFailedTitle": "파일 음성 인식 실패",
-    "transcriptionFailedTitle": "음성 인식 실패"
+    "transcriptionFailedTitle": "음성 인식 실패",
+    "noSelectedTextTitle": "No Text Selected",
+    "noSelectedText": "Highlight some text before using Command mode, or switch to Smart mode.",
+    "transformFailedTitle": "Transform Failed",
+    "transformFailed": "Text transform didn't finish, so your selected text was left unchanged."
   },
   "notices": {
     "errorOne": "오류 {{n}}개",

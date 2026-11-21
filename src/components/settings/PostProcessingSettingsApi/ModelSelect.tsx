@@ -10,6 +10,7 @@ type ModelSelectProps = {
   isLoading?: boolean;
   onSelect: (value: string) => void;
   onCreate: (value: string) => void;
+  onDraftChange?: (draft: string) => void;
   onBlur: () => void;
   className?: string;
 };
@@ -23,8 +24,9 @@ export const ModelSelect: React.FC<ModelSelectProps> = React.memo(
     isLoading,
     onSelect,
     onCreate,
+    onDraftChange,
     onBlur,
-    className = "flex-1 min-w-[360px]",
+    className = "flex-1 min-w-0",
   }) => {
     const handleCreate = (inputValue: string) => {
       const trimmed = inputValue.trim();
@@ -41,6 +43,8 @@ export const ModelSelect: React.FC<ModelSelectProps> = React.memo(
         options={options}
         onChange={(selected) => onSelect(selected ?? "")}
         onCreateOption={handleCreate}
+        commitOnBlur
+        onDraftChange={onDraftChange}
         onBlur={onBlur}
         placeholder={placeholder}
         disabled={disabled}

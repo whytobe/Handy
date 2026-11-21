@@ -193,6 +193,18 @@ fn flush_pending(app_handle: &AppHandle, enigo: &mut enigo::Enigo) {
     }
 }
 
+/// Settles any pending reliable-paste transaction on the main thread so a
+/// subsequent clipboard snapshot reads the user's original clipboard.
+pub(super) fn flush_pending_on_main(app_handle: &AppHandle) {
+    let previous = match PENDING.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(_) => None,
+    };
+    if let Some(previous) = previous {
+        settle(&previous, app_handle, None);
+    }
+}
+
 fn spawn_waiter(pending: Arc<Mutex<MacPending>>, app_handle: AppHandle) {
     thread::spawn(move || {
         let outcome = loop {

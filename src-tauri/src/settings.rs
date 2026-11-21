@@ -121,6 +121,65 @@ pub struct PostProcessProvider {
     pub api_format: PostProcessApiFormat,
 }
 
+/// How the dedicated Text Transform shortcut behaves when triggered.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformMode {
+    /// If text is selected, apply a voice command to transform it; otherwise
+    /// format dictation using the active app rule or default dictation style.
+    #[default]
+    Smart,
+    /// Always capture selected text and transform it using the spoken command.
+    Command,
+    /// Always dictate and format text according to the active application rule.
+    AutoStyle,
+}
+
+/// How a prompt-specific shortcut behaves when text is currently highlighted.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformSelectionBehavior {
+    /// Immediately transform highlighted text using the prompt without opening the mic.
+    Instant,
+    /// Open the microphone to speak a voice instruction for the highlighted text.
+    VoiceCommand,
+}
+
+fn default_transform_app_rule_enabled() -> bool {
+    true
+}
+
+/// Maps an application (bundle ID or app name) to a transform prompt for
+/// Auto-Style / Smart dictation mode.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Type)]
+pub struct TransformAppRule {
+    pub id: String,
+    pub app_name: String,
+    pub app_identifier: String,
+    pub prompt_id: String,
+    #[serde(default = "default_transform_app_rule_enabled")]
+    pub enabled: bool,
+}
+
+pub const TRANSFORM_PROMPT_BINDING_PREFIX: &str = "transform_prompt:";
+
+/// Returns the `settings.bindings` key used for a transform prompt's dedicated shortcut.
+pub fn transform_prompt_binding_id(prompt_id: &str) -> String {
+    format!("{TRANSFORM_PROMPT_BINDING_PREFIX}{prompt_id}")
+}
+
+/// Extracts the prompt ID from a `transform_prompt:<id>` binding key, if valid.
+pub fn transform_prompt_id_from_binding(binding_id: &str) -> Option<&str> {
+    binding_id
+        .strip_prefix(TRANSFORM_PROMPT_BINDING_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
+/// Returns true for both the primary `transform_text` binding and any per-prompt binding.
+pub fn is_transform_binding(binding_id: &str) -> bool {
+    binding_id == "transform_text" || transform_prompt_id_from_binding(binding_id).is_some()
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlayPosition {
@@ -498,6 +557,22 @@ pub struct AppSettings {
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
     #[serde(default)]
+    pub transform_enabled: bool,
+    #[serde(default)]
+    pub transform_mode: TransformMode,
+    #[serde(default = "default_transform_prompts")]
+    pub transform_prompts: Vec<LLMPrompt>,
+    #[serde(default)]
+    pub transform_prompt_selection_behaviors: HashMap<String, TransformSelectionBehavior>,
+    #[serde(default = "default_transform_selected_prompt_id")]
+    pub transform_selected_prompt_id: Option<String>,
+    #[serde(default)]
+    pub transform_default_dictation_prompt_id: Option<String>,
+    #[serde(default = "default_transform_app_rules")]
+    pub transform_app_rules: Vec<TransformAppRule>,
+    #[serde(default = "default_transform_clipboard_fallback")]
+    pub transform_clipboard_fallback: bool,
+    #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
     pub append_trailing_space: bool,
@@ -862,6 +937,91 @@ fn default_post_process_prompts() -> Vec<LLMPrompt> {
     }]
 }
 
+fn default_transform_prompts() -> Vec<LLMPrompt> {
+    vec![
+        LLMPrompt {
+            id: "default_command_transform".to_string(),
+            name: "Transform Selection (Command)".to_string(),
+            prompt: "You are a text transformation assistant. Rewrite or transform the selected text strictly according to the user's spoken instruction. Keep the original language unless the instruction asks to translate. Return only the transformed text with no explanations, quotes, or markdown code fences unless requested.\n\nSelected text:\n${text}\n\nInstruction: ${instruction}".to_string(),
+        },
+        LLMPrompt {
+            id: "default_style_casual".to_string(),
+            name: "Casual & Concise".to_string(),
+            prompt: "Clean up the transcript into natural, friendly, concise casual messaging style. Fix grammar and punctuation, remove filler words, keep the original language, and preserve the speaker's intent.\n\n<transcript>\n${output}\n</transcript>\n\nReturn only the formatted text.".to_string(),
+        },
+        LLMPrompt {
+            id: "default_style_professional".to_string(),
+            name: "Professional Email".to_string(),
+            prompt: "Rewrite the transcript into a clear, polite, well-structured professional message or email. Fix grammar, punctuation, and capitalization, remove filler words, and keep the original language unless translating is implied.\n\n<transcript>\n${output}\n</transcript>\n\nReturn only the formatted text.".to_string(),
+        },
+        LLMPrompt {
+            id: "default_style_notes".to_string(),
+            name: "Structured Notes".to_string(),
+            prompt: "Format the transcript into clean, well-organized notes or bullet points where appropriate, fixing grammar and removing filler words while preserving all facts and the original language.\n\n<transcript>\n${output}\n</transcript>\n\nReturn only the formatted text.".to_string(),
+        },
+        LLMPrompt {
+            id: "default_style_code".to_string(),
+            name: "Technical / Code Prompt".to_string(),
+            prompt: "Clean up the transcript for a technical chat or coding assistant. Preserve technical terms, file paths, symbol names, CLI flags, and code identifiers accurately, fix punctuation, and remove filler words while keeping the original language.\n\n<transcript>\n${output}\n</transcript>\n\nReturn only the formatted text.".to_string(),
+        },
+    ]
+}
+
+fn default_transform_selected_prompt_id() -> Option<String> {
+    Some("default_command_transform".to_string())
+}
+
+fn default_transform_app_rules() -> Vec<TransformAppRule> {
+    vec![
+        TransformAppRule {
+            id: "rule_mail".to_string(),
+            app_name: "Mail".to_string(),
+            app_identifier: "com.apple.mail".to_string(),
+            prompt_id: "default_style_professional".to_string(),
+            enabled: true,
+        },
+        TransformAppRule {
+            id: "rule_slack".to_string(),
+            app_name: "Slack".to_string(),
+            app_identifier: "com.tinyspeck.slackmacgap".to_string(),
+            prompt_id: "default_style_casual".to_string(),
+            enabled: true,
+        },
+        TransformAppRule {
+            id: "rule_messages".to_string(),
+            app_name: "Messages".to_string(),
+            app_identifier: "com.apple.MobileSMS".to_string(),
+            prompt_id: "default_style_casual".to_string(),
+            enabled: true,
+        },
+        TransformAppRule {
+            id: "rule_notes".to_string(),
+            app_name: "Notes".to_string(),
+            app_identifier: "com.apple.Notes".to_string(),
+            prompt_id: "default_style_notes".to_string(),
+            enabled: true,
+        },
+        TransformAppRule {
+            id: "rule_cursor".to_string(),
+            app_name: "Cursor".to_string(),
+            app_identifier: "com.todesktop.230313mzl4w4u92".to_string(),
+            prompt_id: "default_style_code".to_string(),
+            enabled: true,
+        },
+        TransformAppRule {
+            id: "rule_vscode".to_string(),
+            app_name: "Visual Studio Code".to_string(),
+            app_identifier: "com.microsoft.VSCode".to_string(),
+            prompt_id: "default_style_code".to_string(),
+            enabled: true,
+        },
+    ]
+}
+
+fn default_transform_clipboard_fallback() -> bool {
+    true
+}
+
 fn default_transcribe_gpu_device() -> Option<String> {
     None // automatic device selection
 }
@@ -954,6 +1114,52 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
     changed
 }
 
+fn ensure_transform_defaults(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+
+    if settings.transform_prompts.is_empty() {
+        settings.transform_prompts = default_transform_prompts();
+        changed = true;
+    }
+
+    let selected_valid = settings
+        .transform_selected_prompt_id
+        .as_ref()
+        .is_some_and(|id| settings.transform_prompts.iter().any(|p| &p.id == id));
+    if !selected_valid {
+        settings.transform_selected_prompt_id =
+            settings.transform_prompts.first().map(|p| p.id.clone());
+        changed = true;
+    }
+
+    let before_len = settings.bindings.len();
+    settings.bindings.retain(|id, binding| {
+        let Some(prompt_id) = transform_prompt_id_from_binding(id) else {
+            return true;
+        };
+        !binding.current_binding.trim().is_empty()
+            && settings.transform_prompts.iter().any(|p| p.id == prompt_id)
+    });
+    if settings.bindings.len() != before_len {
+        changed = true;
+    }
+
+    let before_behavior_len = settings.transform_prompt_selection_behaviors.len();
+    settings
+        .transform_prompt_selection_behaviors
+        .retain(|prompt_id, _| {
+            settings
+                .transform_prompts
+                .iter()
+                .any(|p| &p.id == prompt_id)
+        });
+    if settings.transform_prompt_selection_behaviors.len() != before_behavior_len {
+        changed = true;
+    }
+
+    changed
+}
+
 pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
 
 pub fn get_default_settings() -> AppSettings {
@@ -995,6 +1201,27 @@ pub fn get_default_settings() -> AppSettings {
                 .to_string(),
             default_binding: default_post_process_shortcut.to_string(),
             current_binding: default_post_process_shortcut.to_string(),
+        },
+    );
+    #[cfg(target_os = "windows")]
+    let default_transform_shortcut = "ctrl+alt+space";
+    #[cfg(target_os = "macos")]
+    let default_transform_shortcut = "ctrl+shift+space";
+    #[cfg(target_os = "linux")]
+    let default_transform_shortcut = "ctrl+alt+shift+t";
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let default_transform_shortcut = "alt+ctrl+space";
+
+    bindings.insert(
+        "transform_text".to_string(),
+        ShortcutBinding {
+            id: "transform_text".to_string(),
+            name: "Transform Text".to_string(),
+            description:
+                "Transforms selected text with voice commands or formats dictation by app."
+                    .to_string(),
+            default_binding: default_transform_shortcut.to_string(),
+            current_binding: default_transform_shortcut.to_string(),
         },
     );
     bindings.insert(
@@ -1050,6 +1277,14 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
+        transform_enabled: false,
+        transform_mode: TransformMode::default(),
+        transform_prompts: default_transform_prompts(),
+        transform_prompt_selection_behaviors: HashMap::new(),
+        transform_selected_prompt_id: default_transform_selected_prompt_id(),
+        transform_default_dictation_prompt_id: None,
+        transform_app_rules: default_transform_app_rules(),
+        transform_clipboard_fallback: default_transform_clipboard_fallback(),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),
@@ -1116,6 +1351,21 @@ impl AppSettings {
             .iter_mut()
             .find(|provider| provider.id == provider_id)
     }
+
+    /// Returns how a prompt-specific shortcut handles highlighted text.
+    pub fn transform_selection_behavior_for_prompt(
+        &self,
+        prompt_id: &str,
+    ) -> TransformSelectionBehavior {
+        if let Some(&behavior) = self.transform_prompt_selection_behaviors.get(prompt_id) {
+            return behavior;
+        }
+        if prompt_id == "default_command_transform" {
+            TransformSelectionBehavior::VoiceCommand
+        } else {
+            TransformSelectionBehavior::Instant
+        }
+    }
 }
 
 /// Startup entry point. Same load-or-create/salvage/migrate behavior as
@@ -1168,7 +1418,7 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
-    if ensure_post_process_defaults(&mut settings) {
+    if ensure_post_process_defaults(&mut settings) | ensure_transform_defaults(&mut settings) {
         store.set("settings", serde_json::to_value(&settings).unwrap());
     }
 
@@ -2170,5 +2420,148 @@ mod tests {
         ));
         assert!(!linux_self_update_possible(Some(BundleKind::Other), all));
         assert!(!linux_self_update_possible(None, all));
+    }
+
+    #[test]
+    fn default_transform_settings_and_binding_are_populated() {
+        let defaults = get_default_settings();
+        assert!(!defaults.transform_enabled);
+        assert_eq!(defaults.transform_mode, TransformMode::Smart);
+        assert!(defaults.transform_clipboard_fallback);
+        assert!(!defaults.transform_prompts.is_empty());
+        assert_eq!(
+            defaults.transform_selected_prompt_id.as_deref(),
+            Some("default_command_transform")
+        );
+        assert_eq!(defaults.transform_default_dictation_prompt_id, None);
+        assert!(!defaults.transform_app_rules.is_empty());
+        assert!(defaults.bindings.contains_key("transform_text"));
+    }
+
+    #[test]
+    fn ensure_transform_defaults_restores_empty_prompts_and_invalid_selection() {
+        let mut settings = get_default_settings();
+        settings.transform_prompts.clear();
+        settings.transform_selected_prompt_id = Some("nonexistent".to_string());
+
+        assert!(ensure_transform_defaults(&mut settings));
+        assert!(!settings.transform_prompts.is_empty());
+        assert_eq!(
+            settings.transform_selected_prompt_id.as_deref(),
+            Some("default_command_transform")
+        );
+        assert!(!ensure_transform_defaults(&mut settings));
+    }
+
+    #[test]
+    fn transform_prompt_binding_helpers_round_trip_and_reject_empty_id() {
+        let binding_id = transform_prompt_binding_id("default_style_notes");
+        assert_eq!(binding_id, "transform_prompt:default_style_notes");
+        assert_eq!(
+            transform_prompt_id_from_binding(&binding_id),
+            Some("default_style_notes")
+        );
+        assert!(is_transform_binding(&binding_id));
+        assert!(is_transform_binding("transform_text"));
+
+        assert_eq!(transform_prompt_id_from_binding("transform_prompt:"), None);
+        assert!(!is_transform_binding("transform_prompt:"));
+        assert!(!is_transform_binding("transcribe"));
+    }
+
+    #[test]
+    fn ensure_transform_defaults_prunes_orphaned_and_empty_prompt_bindings() {
+        let mut settings = get_default_settings();
+        settings.bindings.insert(
+            transform_prompt_binding_id("default_style_notes"),
+            ShortcutBinding {
+                id: transform_prompt_binding_id("default_style_notes"),
+                name: "Structured Notes".to_string(),
+                description: "valid".to_string(),
+                default_binding: String::new(),
+                current_binding: "ctrl+shift+n".to_string(),
+            },
+        );
+        settings.bindings.insert(
+            transform_prompt_binding_id("deleted_prompt"),
+            ShortcutBinding {
+                id: transform_prompt_binding_id("deleted_prompt"),
+                name: "Deleted".to_string(),
+                description: "stale".to_string(),
+                default_binding: String::new(),
+                current_binding: "ctrl+shift+d".to_string(),
+            },
+        );
+        settings.bindings.insert(
+            transform_prompt_binding_id("default_style_casual"),
+            ShortcutBinding {
+                id: transform_prompt_binding_id("default_style_casual"),
+                name: "Casual".to_string(),
+                description: "empty".to_string(),
+                default_binding: String::new(),
+                current_binding: "   ".to_string(),
+            },
+        );
+
+        assert!(ensure_transform_defaults(&mut settings));
+        assert!(settings
+            .bindings
+            .contains_key(&transform_prompt_binding_id("default_style_notes")));
+        assert!(!settings
+            .bindings
+            .contains_key(&transform_prompt_binding_id("deleted_prompt")));
+        assert!(!settings
+            .bindings
+            .contains_key(&transform_prompt_binding_id("default_style_casual")));
+        assert!(settings.bindings.contains_key("transform_text"));
+        assert!(!ensure_transform_defaults(&mut settings));
+    }
+
+    #[test]
+    fn transform_selection_behavior_defaults_and_prunes_stale_entries() {
+        let mut settings = get_default_settings();
+        assert_eq!(
+            settings.transform_selection_behavior_for_prompt("default_command_transform"),
+            TransformSelectionBehavior::VoiceCommand
+        );
+        assert_eq!(
+            settings.transform_selection_behavior_for_prompt("default_style_notes"),
+            TransformSelectionBehavior::Instant
+        );
+        assert_eq!(
+            settings.transform_selection_behavior_for_prompt("transform_prompt_custom"),
+            TransformSelectionBehavior::Instant
+        );
+
+        settings.transform_prompt_selection_behaviors.insert(
+            "default_command_transform".to_string(),
+            TransformSelectionBehavior::Instant,
+        );
+        settings.transform_prompt_selection_behaviors.insert(
+            "default_style_notes".to_string(),
+            TransformSelectionBehavior::VoiceCommand,
+        );
+        settings.transform_prompt_selection_behaviors.insert(
+            "deleted_prompt".to_string(),
+            TransformSelectionBehavior::Instant,
+        );
+
+        assert_eq!(
+            settings.transform_selection_behavior_for_prompt("default_command_transform"),
+            TransformSelectionBehavior::Instant
+        );
+        assert_eq!(
+            settings.transform_selection_behavior_for_prompt("default_style_notes"),
+            TransformSelectionBehavior::VoiceCommand
+        );
+
+        assert!(ensure_transform_defaults(&mut settings));
+        assert!(!settings
+            .transform_prompt_selection_behaviors
+            .contains_key("deleted_prompt"));
+        assert!(settings
+            .transform_prompt_selection_behaviors
+            .contains_key("default_command_transform"));
+        assert!(!ensure_transform_defaults(&mut settings));
     }
 }

@@ -3,6 +3,7 @@ import SelectComponent from "react-select";
 import CreatableSelect from "react-select/creatable";
 import type {
   ActionMeta,
+  InputActionMeta,
   Props as ReactSelectProps,
   SingleValue,
   StylesConfig,
@@ -21,6 +22,8 @@ type BaseProps = {
   disabled?: boolean;
   isLoading?: boolean;
   isClearable?: boolean;
+  commitOnBlur?: boolean;
+  onDraftChange?: (draft: string) => void;
   onChange: (value: string | null, action: ActionMeta<SelectOption>) => void;
   onBlur?: () => void;
   className?: string;
@@ -89,6 +92,10 @@ const selectStyles: StylesConfig<SelectOption, false> = {
       color: "var(--color-logo-primary)",
     },
   }),
+  menuPortal: (base) => ({
+    ...base,
+    zIndex: 60,
+  }),
   menu: (provided) => ({
     ...provided,
     zIndex: 30,
@@ -122,6 +129,8 @@ export const Select: React.FC<SelectProps> = React.memo(
     disabled,
     isLoading,
     isClearable = true,
+    commitOnBlur = false,
+    onDraftChange,
     onChange,
     onBlur,
     className = "",
@@ -129,6 +138,8 @@ export const Select: React.FC<SelectProps> = React.memo(
     formatCreateLabel,
     onCreateOption,
   }) => {
+    const inputRef = React.useRef("");
+
     const selectValue = React.useMemo(() => {
       if (!value) return null;
       const existing = options.find((option) => option.value === value);
@@ -136,11 +147,42 @@ export const Select: React.FC<SelectProps> = React.memo(
       return { value, label: value, isDisabled: false };
     }, [value, options]);
 
+    const clearDraft = React.useCallback(() => {
+      if (inputRef.current !== "") {
+        inputRef.current = "";
+        onDraftChange?.("");
+      }
+    }, [onDraftChange]);
+
     const handleChange = (
       option: SingleValue<SelectOption>,
       action: ActionMeta<SelectOption>,
     ) => {
+      clearDraft();
       onChange(option?.value ?? null, action);
+    };
+
+    const handleInputChange = (
+      inputValue: string,
+      actionMeta: InputActionMeta,
+    ) => {
+      if (actionMeta.action === "input-change") {
+        inputRef.current = inputValue;
+        onDraftChange?.(inputValue);
+      } else if (actionMeta.action === "set-value") {
+        clearDraft();
+      }
+    };
+
+    const handleBlur = () => {
+      if (commitOnBlur && isCreatable && onCreateOption) {
+        const draft = inputRef.current.trim();
+        clearDraft();
+        if (draft && draft !== (value ?? "").trim()) {
+          onCreateOption(draft);
+        }
+      }
+      onBlur?.();
     };
 
     const sharedProps: Partial<ReactSelectProps<SelectOption, false>> = {
@@ -149,11 +191,22 @@ export const Select: React.FC<SelectProps> = React.memo(
       value: selectValue,
       options,
       onChange: handleChange,
+      onInputChange: handleInputChange,
       placeholder,
       isDisabled: disabled,
       isLoading,
-      onBlur,
+      onBlur: handleBlur,
       isClearable,
+      menuPlacement: "auto",
+      menuPosition: "fixed",
+      menuPortalTarget:
+        typeof document !== "undefined" ? document.body : undefined,
+      menuShouldScrollIntoView: false,
+      closeMenuOnScroll: (event) =>
+        !(
+          event.target instanceof Element &&
+          Boolean(event.target.closest(".app-select__menu"))
+        ),
       styles: selectStyles,
     };
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { RefreshCcw } from "lucide-react";
+import { FlaskConical, Loader2, RefreshCcw } from "lucide-react";
 import { commands, type PostProcessApiFormat } from "@/bindings";
 
 import { Alert } from "../../ui/Alert";
@@ -45,11 +45,69 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
       </SettingContainer>
 
       {state.isAppleProvider ? (
-        state.appleIntelligenceUnavailable ? (
-          <Alert variant="error" contained>
-            {t("settings.postProcessing.api.appleIntelligence.unavailable")}
-          </Alert>
-        ) : null
+        <>
+          {state.appleIntelligenceUnavailable ? (
+            <Alert variant="error" contained>
+              {t("settings.postProcessing.api.appleIntelligence.unavailable")}
+            </Alert>
+          ) : null}
+          <SettingContainer
+            title={t("settings.postProcessing.api.test.title")}
+            description={t("settings.postProcessing.api.test.description")}
+            descriptionMode="tooltip"
+            layout="stacked"
+            grouped={true}
+          >
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="md"
+                  onClick={() => void state.handleTestModel()}
+                  disabled={state.isTestingModel}
+                  className="h-9 shrink-0 whitespace-nowrap inline-flex items-center gap-1.5"
+                >
+                  {state.isTestingModel ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <FlaskConical className="h-4 w-4" />
+                  )}
+                  <span>
+                    {t(
+                      state.isTestingModel
+                        ? "settings.postProcessing.api.test.testing"
+                        : "settings.postProcessing.api.test.button",
+                    )}
+                  </span>
+                </Button>
+              </div>
+              {state.testStatus.kind === "success" && (
+                <Alert variant="success" className="py-2.5 px-3 select-text">
+                  <span className="font-medium block">
+                    {t("settings.postProcessing.api.test.success", {
+                      model: state.testStatus.model,
+                      latency: state.testStatus.latencyMs,
+                    })}
+                  </span>
+                  <span className="block text-xs mt-0.5 opacity-90 break-words">
+                    {state.testStatus.responsePreview}
+                  </span>
+                </Alert>
+              )}
+              {state.testStatus.kind === "error" && (
+                <Alert variant="error" className="py-2.5 px-3 select-text">
+                  <span className="font-medium block">
+                    {t("settings.postProcessing.api.test.failed")}
+                  </span>
+                  <span className="block text-xs mt-0.5 opacity-90 break-words">
+                    {state.testStatus.message}
+                  </span>
+                </Alert>
+              )}
+            </div>
+          </SettingContainer>
+        </>
       ) : (
         <>
           {state.isCustomProvider && (
@@ -146,34 +204,98 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
           layout="stacked"
           grouped={true}
         >
-          <div className="flex items-center gap-2">
-            <ModelSelect
-              value={state.model}
-              options={state.modelOptions}
-              disabled={state.isModelUpdating}
-              isLoading={state.isFetchingModels}
-              placeholder={
-                state.modelOptions.length > 0
-                  ? t(
-                      "settings.postProcessing.api.model.placeholderWithOptions",
-                    )
-                  : t("settings.postProcessing.api.model.placeholderNoOptions")
-              }
-              onSelect={state.handleModelSelect}
-              onCreate={state.handleModelCreate}
-              onBlur={() => {}}
-              className="flex-1 min-w-[380px]"
-            />
-            <ResetButton
-              onClick={state.handleRefreshModels}
-              disabled={state.isFetchingModels}
-              ariaLabel={t("settings.postProcessing.api.model.refreshModels")}
-              className="flex h-10 w-10 items-center justify-center"
-            >
-              <RefreshCcw
-                className={`h-4 w-4 ${state.isFetchingModels ? "animate-spin" : ""}`}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <ModelSelect
+                value={state.model}
+                options={state.modelOptions}
+                disabled={state.isModelUpdating}
+                isLoading={state.isFetchingModels}
+                placeholder={
+                  state.modelOptions.length > 0
+                    ? t(
+                        "settings.postProcessing.api.model.placeholderWithOptions",
+                      )
+                    : t(
+                        "settings.postProcessing.api.model.placeholderNoOptions",
+                      )
+                }
+                onSelect={state.handleModelSelect}
+                onCreate={state.handleModelCreate}
+                onDraftChange={state.handleModelDraftChange}
+                onBlur={() => {}}
+                className="flex-1 min-w-0"
               />
-            </ResetButton>
+              <ResetButton
+                onClick={state.handleRefreshModels}
+                disabled={state.isFetchingModels || state.isTestingModel}
+                ariaLabel={t("settings.postProcessing.api.model.refreshModels")}
+                className="flex h-10 w-10 items-center justify-center shrink-0"
+              >
+                <RefreshCcw
+                  className={`h-4 w-4 ${state.isFetchingModels ? "animate-spin" : ""}`}
+                />
+              </ResetButton>
+              <Button
+                type="button"
+                variant="secondary"
+                size="md"
+                onClick={() => void state.handleTestModel()}
+                disabled={state.isTestingModel || state.isFetchingModels}
+                className="h-10 shrink-0 whitespace-nowrap inline-flex items-center gap-1.5"
+              >
+                {state.isTestingModel ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FlaskConical className="h-4 w-4" />
+                )}
+                <span>
+                  {t(
+                    state.isTestingModel
+                      ? "settings.postProcessing.api.test.testing"
+                      : "settings.postProcessing.api.test.button",
+                  )}
+                </span>
+              </Button>
+            </div>
+            {state.testStatus.kind === "success" && (
+              <Alert variant="success" className="py-2.5 px-3 select-text">
+                <span className="font-medium block">
+                  {t("settings.postProcessing.api.test.success", {
+                    model: state.testStatus.model,
+                    latency: state.testStatus.latencyMs,
+                  })}
+                </span>
+                <span className="block text-xs mt-0.5 opacity-90 break-words">
+                  {state.testStatus.responsePreview}
+                </span>
+              </Alert>
+            )}
+            {state.testStatus.kind === "missing_model" && (
+              <Alert variant="error" className="py-2.5 px-3 select-text">
+                {t("settings.postProcessing.api.test.missingModel")}
+              </Alert>
+            )}
+            {state.testStatus.kind === "error" && (
+              <Alert variant="error" className="py-2.5 px-3 select-text">
+                <span className="font-medium block">
+                  {t("settings.postProcessing.api.test.failed")}
+                </span>
+                <span className="block text-xs mt-0.5 opacity-90 break-words">
+                  {state.testStatus.message}
+                </span>
+              </Alert>
+            )}
+            {state.fetchModelsError && (
+              <Alert variant="error" className="py-2.5 px-3 select-text">
+                <span className="font-medium block">
+                  {t("settings.postProcessing.api.test.fetchModelsFailed")}
+                </span>
+                <span className="block text-xs mt-0.5 opacity-90 break-words">
+                  {state.fetchModelsError}
+                </span>
+              </Alert>
+            )}
           </div>
         </SettingContainer>
       )}

@@ -14,7 +14,7 @@ pub mod handy_keys;
 pub mod tauri_impl;
 
 use log::{debug, error, info, warn};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
@@ -24,8 +24,8 @@ use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::settings::{
     self, get_settings, AutoSubmitKey, ChineseScript, ClipboardHandling, KeyboardImplementation,
     LLMPrompt, LanguageDetectionMode, OverlayPosition, OverlayStyle, PasteMethod,
-    ShortcutActivation, ShortcutBinding, SoundTheme, Theme, TypingTool, VadBackend,
-    APPLE_INTELLIGENCE_PROVIDER_ID,
+    ShortcutActivation, ShortcutBinding, SoundTheme, Theme, TransformAppRule, TransformMode,
+    TransformSelectionBehavior, TypingTool, VadBackend, APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::tray;
 
@@ -133,6 +133,99 @@ fn reconcile_cancel_shortcut(app: &AppHandle) {
     }
 }
 
+pub(crate) fn is_binding_enabled(settings: &settings::AppSettings, id: &str) -> bool {
+    if settings::is_transform_binding(id) {
+        return settings.transform_enabled;
+    }
+    match id {
+        "transcribe_with_post_process" => settings.post_process_enabled,
+        _ => true,
+    }
+}
+
+pub(crate) fn enabled_startup_bindings(
+    user_settings: &settings::AppSettings,
+) -> Vec<ShortcutBinding> {
+    let mut bindings = user_settings.bindings.clone();
+    for (id, default_binding) in settings::get_default_settings().bindings {
+        bindings.entry(id).or_insert(default_binding);
+    }
+
+    bindings
+        .into_iter()
+        .filter(|(id, binding)| {
+            id != "cancel"
+                && is_binding_enabled(user_settings, id)
+                && !binding.current_binding.trim().is_empty()
+        })
+        .map(|(_, binding)| binding)
+        .collect()
+}
+
+fn prompt_binding_description(prompt_name: &str) -> String {
+    format!("Run text transform with '{prompt_name}'.")
+}
+
+fn shortcuts_conflict(a: &str, b: &str, implementation: KeyboardImplementation) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    match implementation {
+        KeyboardImplementation::HandyKeys => {
+            if let (Ok(ha), Ok(hb)) = (
+                a.parse::<::handy_keys::Hotkey>(),
+                b.parse::<::handy_keys::Hotkey>(),
+            ) {
+                return ha == hb;
+            }
+        }
+        KeyboardImplementation::Tauri => {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if let (Ok(sa), Ok(sb)) = (
+                a.parse::<tauri_plugin_global_shortcut::Shortcut>(),
+                b.parse::<tauri_plugin_global_shortcut::Shortcut>(),
+            ) {
+                return sa == sb;
+            }
+        }
+        KeyboardImplementation::None => {}
+    }
+    a.eq_ignore_ascii_case(b)
+}
+
+fn find_conflicting_binding<'a>(
+    settings: &'a settings::AppSettings,
+    target_id: &str,
+    new_binding: &str,
+) -> Option<&'a ShortcutBinding> {
+    if target_id == "cancel" {
+        return None;
+    }
+    let target_is_transform = settings::is_transform_binding(target_id);
+    settings
+        .bindings
+        .iter()
+        .find_map(|(other_id, other_binding)| {
+            if other_id == target_id || other_id == "cancel" {
+                return None;
+            }
+            let other_is_transform = settings::is_transform_binding(other_id);
+            let should_check = is_binding_enabled(settings, other_id)
+                || (target_is_transform && other_is_transform);
+            if !should_check {
+                return None;
+            }
+            shortcuts_conflict(
+                new_binding,
+                &other_binding.current_binding,
+                settings.keyboard_implementation,
+            )
+            .then_some(other_binding)
+        })
+}
+
 /// Register a shortcut using the appropriate implementation
 pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<(), String> {
     let settings = get_settings(app);
@@ -177,30 +270,53 @@ pub fn change_binding(
     }
 
     let mut settings = settings::get_settings(&app);
+    let had_existing_binding = settings
+        .bindings
+        .get(&id)
+        .is_some_and(|b| !b.current_binding.trim().is_empty());
 
-    // Get the binding to modify, or create it from defaults if it doesn't exist
+    // Get the binding to modify, create from defaults, or synthesize for a transform prompt
     let binding_to_modify = match settings.bindings.get(&id) {
         Some(binding) => binding.clone(),
         None => {
-            // Try to get the default binding for this id
             let default_settings = settings::get_default_settings();
-            match default_settings.bindings.get(&id) {
-                Some(default_binding) => {
-                    warn!(
-                        "Binding '{}' not found in settings, creating from defaults",
-                        id
-                    );
-                    default_binding.clone()
-                }
-                None => {
-                    let error_msg = format!("Binding with id '{}' not found in defaults", id);
-                    warn!("change_binding error: {}", error_msg);
+            if let Some(default_binding) = default_settings.bindings.get(&id) {
+                warn!(
+                    "Binding '{}' not found in settings, creating from defaults",
+                    id
+                );
+                default_binding.clone()
+            } else if let Some(prompt_id) = settings::transform_prompt_id_from_binding(&id) {
+                if let Some(prompt) = settings
+                    .transform_prompts
+                    .iter()
+                    .find(|p| p.id == prompt_id)
+                {
+                    ShortcutBinding {
+                        id: id.clone(),
+                        name: prompt.name.clone(),
+                        description: prompt_binding_description(&prompt.name),
+                        default_binding: String::new(),
+                        current_binding: String::new(),
+                    }
+                } else {
                     return Ok(BindingResponse {
                         success: false,
                         binding: None,
-                        error: Some(error_msg),
+                        error: Some(format!(
+                            "Transform prompt with id '{}' not found",
+                            prompt_id
+                        )),
                     });
                 }
+            } else {
+                let error_msg = format!("Binding with id '{}' not found in defaults", id);
+                warn!("change_binding error: {}", error_msg);
+                return Ok(BindingResponse {
+                    success: false,
+                    binding: None,
+                    error: Some(error_msg),
+                });
             }
         }
     };
@@ -221,17 +337,34 @@ pub fn change_binding(
         }
     }
 
-    // Unregister the existing binding
-    if let Err(e) = unregister_shortcut(&app, binding_to_modify.clone()) {
-        let error_msg = format!("Failed to unregister shortcut: {}", e);
-        error!("change_binding error: {}", error_msg);
+    if let Some(conflict) = find_conflicting_binding(&settings, &id, &binding) {
+        return Ok(BindingResponse {
+            success: false,
+            binding: None,
+            error: Some(format!(
+                "Shortcut '{}' is already assigned to '{}'",
+                binding, conflict.name
+            )),
+        });
+    }
+
+    let binding_active = is_binding_enabled(&settings, &id);
+
+    // Unregister the existing binding if it is currently active
+    if binding_active && had_existing_binding {
+        if let Err(e) = unregister_shortcut(&app, binding_to_modify.clone()) {
+            let error_msg = format!("Failed to unregister shortcut: {}", e);
+            error!("change_binding error: {}", error_msg);
+        }
     }
 
     // Validate the new shortcut for the current keyboard implementation
     if let Err(e) = validate_shortcut_for_implementation(&binding, settings.keyboard_implementation)
     {
         warn!("change_binding validation error: {}", e);
-        restore_registration(&app, &binding_to_modify);
+        if binding_active && had_existing_binding {
+            restore_registration(&app, &binding_to_modify);
+        }
         return Err(e);
     }
 
@@ -239,16 +372,20 @@ pub fn change_binding(
     let mut updated_binding = binding_to_modify.clone();
     updated_binding.current_binding = binding;
 
-    // Register the new binding
-    if let Err(e) = register_shortcut(&app, updated_binding.clone()) {
-        let error_msg = format!("Failed to register shortcut: {}", e);
-        error!("change_binding error: {}", error_msg);
-        restore_registration(&app, &binding_to_modify);
-        return Ok(BindingResponse {
-            success: false,
-            binding: None,
-            error: Some(error_msg),
-        });
+    // Register the new binding only when this shortcut feature is enabled
+    if binding_active {
+        if let Err(e) = register_shortcut(&app, updated_binding.clone()) {
+            let error_msg = format!("Failed to register shortcut: {}", e);
+            error!("change_binding error: {}", error_msg);
+            if had_existing_binding {
+                restore_registration(&app, &binding_to_modify);
+            }
+            return Ok(BindingResponse {
+                success: false,
+                binding: None,
+                error: Some(error_msg),
+            });
+        }
     }
 
     // Update the binding in the settings
@@ -264,6 +401,50 @@ pub fn change_binding(
         binding: Some(updated_binding),
         error: None,
     })
+}
+
+/// Remove a transform prompt's dedicated shortcut, if one is assigned.
+#[tauri::command]
+#[specta::specta]
+pub fn clear_transform_prompt_binding(app: AppHandle, prompt_id: String) -> Result<(), String> {
+    let binding_id = settings::transform_prompt_binding_id(&prompt_id);
+    let mut settings = settings::get_settings(&app);
+    if let Some(existing) = settings.bindings.remove(&binding_id) {
+        if settings.transform_enabled && !existing.current_binding.trim().is_empty() {
+            if let Err(e) = unregister_shortcut(&app, existing) {
+                warn!(
+                    "Failed to unregister cleared transform prompt binding '{}': {}",
+                    binding_id, e
+                );
+            }
+        }
+        settings::write_settings(&app, settings);
+        crate::secure_input::reconcile_fallback(&app);
+    }
+    Ok(())
+}
+
+/// Configure what happens when a transform prompt's dedicated shortcut is
+/// triggered while text is selected (`instant` vs `voice_command`).
+#[tauri::command]
+#[specta::specta]
+pub fn set_transform_prompt_selection_behavior(
+    app: AppHandle,
+    prompt_id: String,
+    behavior: TransformSelectionBehavior,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    if !settings.transform_prompts.iter().any(|p| p.id == prompt_id) {
+        return Err(format!(
+            "Transform prompt with id '{}' not found",
+            prompt_id
+        ));
+    }
+    settings
+        .transform_prompt_selection_behaviors
+        .insert(prompt_id, behavior);
+    settings::write_settings(&app, settings);
+    Ok(())
 }
 
 /// Best-effort re-register of the previous binding after a failed change,
@@ -290,7 +471,7 @@ pub fn reset_binding(app: AppHandle, id: String) -> Result<BindingResponse, Stri
 /// by the recording lifecycle.
 pub fn suspend_all_shortcuts(app: &AppHandle) {
     for (id, binding) in settings::get_bindings(app) {
-        if id == "cancel" {
+        if id == "cancel" || binding.current_binding.trim().is_empty() {
             continue;
         }
         if let Err(e) = unregister_shortcut(app, binding) {
@@ -308,10 +489,10 @@ pub fn suspend_all_shortcuts(app: &AppHandle) {
 pub fn resume_all_shortcuts(app: &AppHandle) {
     let settings = get_settings(app);
     for (id, binding) in &settings.bindings {
-        if id == "cancel" {
+        if id == "cancel" || binding.current_binding.trim().is_empty() {
             continue;
         }
-        if id == "transcribe_with_post_process" && !settings.post_process_enabled {
+        if !is_binding_enabled(&settings, id) {
             continue;
         }
         if let Err(e) = register_shortcut(app, binding.clone()) {
@@ -472,7 +653,7 @@ fn unregister_all_shortcuts(app: &AppHandle, implementation: KeyboardImplementat
 
     for (id, binding) in bindings {
         // Skip cancel shortcut as it's dynamically registered
-        if id == "cancel" {
+        if id == "cancel" || binding.current_binding.trim().is_empty() {
             continue;
         }
 
@@ -491,6 +672,27 @@ fn unregister_all_shortcuts(app: &AppHandle, implementation: KeyboardImplementat
     }
 }
 
+/// Register a single binding with the given keyboard implementation.
+fn register_with_implementation(
+    app: &AppHandle,
+    binding: ShortcutBinding,
+    implementation: KeyboardImplementation,
+) {
+    let id = binding.id.clone();
+    let result = match implementation {
+        KeyboardImplementation::Tauri => tauri_impl::register_shortcut(app, binding),
+        KeyboardImplementation::HandyKeys => handy_keys::register_shortcut(app, binding),
+        KeyboardImplementation::None => Ok(()),
+    };
+
+    if let Err(e) = result {
+        error!(
+            "Failed to register shortcut '{}' for {:?}: {}",
+            id, implementation, e
+        );
+    }
+}
+
 /// Register all shortcuts for a specific implementation, validating and resetting invalid ones
 fn register_all_shortcuts_for_implementation(
     app: &AppHandle,
@@ -506,8 +708,8 @@ fn register_all_shortcuts_for_implementation(
             continue;
         }
 
-        // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !current_settings.post_process_enabled {
+        // Skip disabled optional shortcuts
+        if !is_binding_enabled(&current_settings, id) {
             continue;
         }
 
@@ -534,19 +736,37 @@ fn register_all_shortcuts_for_implementation(
             reset_bindings.push(id.clone());
         }
 
-        // Register with the appropriate implementation
-        let result = match implementation {
-            KeyboardImplementation::Tauri => tauri_impl::register_shortcut(app, binding),
-            KeyboardImplementation::HandyKeys => handy_keys::register_shortcut(app, binding),
-            KeyboardImplementation::None => Ok(()),
-        };
+        register_with_implementation(app, binding, implementation);
+    }
 
-        if let Err(e) = result {
-            error!(
-                "Failed to register shortcut '{}' for {:?}: {}",
-                id, implementation, e
-            );
+    let custom_prompt_bindings: Vec<(String, ShortcutBinding)> = current_settings
+        .bindings
+        .iter()
+        .filter(|(id, binding)| {
+            settings::transform_prompt_id_from_binding(id).is_some()
+                && !binding.current_binding.trim().is_empty()
+        })
+        .map(|(id, binding)| (id.clone(), binding.clone()))
+        .collect();
+
+    for (id, binding) in custom_prompt_bindings {
+        if !is_binding_enabled(&current_settings, &id) {
+            continue;
         }
+
+        if let Err(e) =
+            validate_shortcut_for_implementation(&binding.current_binding, implementation)
+        {
+            info!(
+                "Custom transform shortcut '{}' ({}) is invalid for {:?}: {}. Removing it.",
+                id, binding.current_binding, implementation, e
+            );
+            current_settings.bindings.remove(&id);
+            reset_bindings.push(id);
+            continue;
+        }
+
+        register_with_implementation(app, binding, implementation);
     }
 
     // Save settings if any bindings were reset
@@ -1365,6 +1585,112 @@ pub async fn fetch_post_process_models(
     crate::llm_client::fetch_models(provider, api_key).await
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct PostProcessModelTestResult {
+    pub model: String,
+    pub response_preview: String,
+    pub latency_ms: u32,
+}
+
+/// Verify that the configured post-processing / transform provider & model responds.
+#[tauri::command]
+#[specta::specta]
+pub async fn test_post_process_model(
+    app: AppHandle,
+    provider_id: String,
+    model_override: Option<String>,
+) -> Result<PostProcessModelTestResult, String> {
+    let settings = settings::get_settings(&app);
+
+    let provider = settings
+        .post_process_providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| format!("Provider '{}' not found", provider_id))?
+        .clone();
+
+    let override_model = model_override
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
+    let stored_model = settings
+        .post_process_models
+        .get(&provider_id)
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
+
+    let started = std::time::Instant::now();
+
+    if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            if !crate::apple_intelligence::check_apple_intelligence_availability() {
+                return Err("Apple Intelligence is not available on this device. Requires an Apple Silicon Mac running macOS 26.0 or later with Apple Intelligence enabled in System Settings.".to_string());
+            }
+
+            let model = override_model
+                .or(stored_model)
+                .unwrap_or_else(|| APPLE_INTELLIGENCE_DEFAULT_MODEL_ID.to_string());
+            let token_limit = model.trim().parse::<i32>().unwrap_or(0);
+            let raw = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                tokio::task::spawn_blocking(move || {
+                    crate::apple_intelligence::process_text_with_system_prompt(
+                        "Reply with OK.",
+                        "Ping",
+                        token_limit,
+                    )
+                }),
+            )
+            .await
+            .map_err(|_| "Connection test timed out after 20 seconds.".to_string())?
+            .map_err(|e| format!("Apple Intelligence test task failed: {e}"))??;
+
+            let response_preview = crate::llm_client::clean_and_preview_response(&raw, 120)
+                .ok_or_else(|| "Apple Intelligence returned an empty response.".to_string())?;
+            let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+
+            return Ok(PostProcessModelTestResult {
+                model,
+                response_preview,
+                latency_ms,
+            });
+        }
+
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            return Err("Apple Intelligence is only available on Apple silicon Macs running macOS 15 or later.".to_string());
+        }
+    }
+
+    let model = override_model
+        .or(stored_model)
+        .ok_or_else(|| "Please enter or select a model name before testing.".to_string())?;
+
+    let api_key = settings
+        .post_process_api_keys
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
+
+    if api_key.trim().is_empty() && provider.id != "custom" {
+        return Err(format!(
+            "API key is required for {}. Please add an API key first.",
+            provider.label
+        ));
+    }
+
+    let disable_reasoning = matches!(provider.id.as_str(), "custom" | "openrouter");
+    let response_preview =
+        crate::llm_client::test_model(&provider, api_key, &model, disable_reasoning).await?;
+    let latency_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+
+    Ok(PostProcessModelTestResult {
+        model,
+        response_preview,
+        latency_ms,
+    })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn set_post_process_selected_prompt(app: AppHandle, id: String) -> Result<(), String> {
@@ -1378,6 +1704,305 @@ pub fn set_post_process_selected_prompt(app: AppHandle, id: String) -> Result<()
     settings.post_process_selected_prompt_id = Some(id);
     settings::write_settings(&app, settings);
     Ok(())
+}
+
+fn generate_unique_id(prefix: &str, existing_ids: impl Iterator<Item = String>) -> String {
+    let existing: std::collections::HashSet<String> = existing_ids.collect();
+    let mut seq = chrono::Utc::now().timestamp_millis();
+    loop {
+        let candidate = format!("{prefix}_{seq}");
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+        seq += 1;
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_transform_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.transform_enabled = enabled;
+    settings::write_settings(&app, settings.clone());
+
+    for (id, binding) in &settings.bindings {
+        if !settings::is_transform_binding(id) || binding.current_binding.trim().is_empty() {
+            continue;
+        }
+        if enabled {
+            let _ = register_shortcut(&app, binding.clone());
+        } else {
+            let _ = unregister_shortcut(&app, binding.clone());
+        }
+    }
+
+    crate::secure_input::reconcile_fallback(&app);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_transform_mode_setting(app: AppHandle, mode: TransformMode) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.transform_mode = mode;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_transform_clipboard_fallback_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.transform_clipboard_fallback = enabled;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn set_transform_selected_prompt(app: AppHandle, id: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+
+    if !settings.transform_prompts.iter().any(|p| p.id == id) {
+        return Err(format!("Transform prompt with id '{}' not found", id));
+    }
+
+    settings.transform_selected_prompt_id = Some(id);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn set_transform_default_dictation_prompt(
+    app: AppHandle,
+    id: Option<String>,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+
+    if let Some(ref prompt_id) = id {
+        if !settings
+            .transform_prompts
+            .iter()
+            .any(|p| &p.id == prompt_id)
+        {
+            return Err(format!(
+                "Transform prompt with id '{}' not found",
+                prompt_id
+            ));
+        }
+    }
+
+    settings.transform_default_dictation_prompt_id = id;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn add_transform_prompt(
+    app: AppHandle,
+    name: String,
+    prompt: String,
+) -> Result<LLMPrompt, String> {
+    let name = name.trim().to_string();
+    let prompt = prompt.trim().to_string();
+    if name.is_empty() || prompt.is_empty() {
+        return Err("Prompt name and instructions cannot be empty".to_string());
+    }
+
+    let mut settings = settings::get_settings(&app);
+    let id = generate_unique_id(
+        "transform_prompt",
+        settings.transform_prompts.iter().map(|p| p.id.clone()),
+    );
+
+    let new_prompt = LLMPrompt { id, name, prompt };
+    settings.transform_prompts.push(new_prompt.clone());
+    settings::write_settings(&app, settings);
+
+    Ok(new_prompt)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn update_transform_prompt(
+    app: AppHandle,
+    id: String,
+    name: String,
+    prompt: String,
+) -> Result<(), String> {
+    let name = name.trim().to_string();
+    let prompt = prompt.trim().to_string();
+    if name.is_empty() || prompt.is_empty() {
+        return Err("Prompt name and instructions cannot be empty".to_string());
+    }
+
+    let mut settings = settings::get_settings(&app);
+
+    if let Some(existing_prompt) = settings.transform_prompts.iter_mut().find(|p| p.id == id) {
+        existing_prompt.name = name.clone();
+        existing_prompt.prompt = prompt;
+        if let Some(binding) = settings
+            .bindings
+            .get_mut(&settings::transform_prompt_binding_id(&id))
+        {
+            binding.name = name.clone();
+            binding.description = prompt_binding_description(&name);
+        }
+        settings::write_settings(&app, settings);
+        Ok(())
+    } else {
+        Err(format!("Transform prompt with id '{}' not found", id))
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn delete_transform_prompt(app: AppHandle, id: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+
+    if settings.transform_prompts.len() <= 1 {
+        return Err("Cannot delete the last transform prompt".to_string());
+    }
+
+    let original_len = settings.transform_prompts.len();
+    settings.transform_prompts.retain(|p| p.id != id);
+
+    if settings.transform_prompts.len() == original_len {
+        return Err(format!("Transform prompt with id '{}' not found", id));
+    }
+
+    let fallback_id = settings.transform_prompts.first().map(|p| p.id.clone());
+
+    if settings.transform_selected_prompt_id.as_ref() == Some(&id) {
+        settings.transform_selected_prompt_id = fallback_id.clone();
+    }
+
+    if settings.transform_default_dictation_prompt_id.as_ref() == Some(&id) {
+        settings.transform_default_dictation_prompt_id = None;
+    }
+
+    if let Some(fallback) = fallback_id {
+        for rule in settings.transform_app_rules.iter_mut() {
+            if rule.prompt_id == id {
+                rule.prompt_id = fallback.clone();
+            }
+        }
+    }
+
+    if let Some(removed_binding) = settings
+        .bindings
+        .remove(&settings::transform_prompt_binding_id(&id))
+    {
+        if settings.transform_enabled && !removed_binding.current_binding.trim().is_empty() {
+            let _ = unregister_shortcut(&app, removed_binding);
+        }
+    }
+    settings.transform_prompt_selection_behaviors.remove(&id);
+
+    settings::write_settings(&app, settings);
+    crate::secure_input::reconcile_fallback(&app);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn add_transform_app_rule(
+    app: AppHandle,
+    app_name: String,
+    app_identifier: String,
+    prompt_id: String,
+) -> Result<TransformAppRule, String> {
+    let app_name = app_name.trim().to_string();
+    let app_identifier = app_identifier.trim().to_string();
+    if app_name.is_empty() || app_identifier.is_empty() {
+        return Err("Application name and identifier cannot be empty".to_string());
+    }
+
+    let mut settings = settings::get_settings(&app);
+    if !settings.transform_prompts.iter().any(|p| p.id == prompt_id) {
+        return Err(format!(
+            "Transform prompt with id '{}' not found",
+            prompt_id
+        ));
+    }
+
+    let id = generate_unique_id(
+        "rule",
+        settings.transform_app_rules.iter().map(|r| r.id.clone()),
+    );
+    let new_rule = TransformAppRule {
+        id,
+        app_name,
+        app_identifier,
+        prompt_id,
+        enabled: true,
+    };
+
+    settings.transform_app_rules.push(new_rule.clone());
+    settings::write_settings(&app, settings);
+    Ok(new_rule)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn update_transform_app_rule(
+    app: AppHandle,
+    id: String,
+    app_name: String,
+    app_identifier: String,
+    prompt_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let app_name = app_name.trim().to_string();
+    let app_identifier = app_identifier.trim().to_string();
+    if app_name.is_empty() || app_identifier.is_empty() {
+        return Err("Application name and identifier cannot be empty".to_string());
+    }
+
+    let mut settings = settings::get_settings(&app);
+    if !settings.transform_prompts.iter().any(|p| p.id == prompt_id) {
+        return Err(format!(
+            "Transform prompt with id '{}' not found",
+            prompt_id
+        ));
+    }
+
+    if let Some(existing_rule) = settings.transform_app_rules.iter_mut().find(|r| r.id == id) {
+        existing_rule.app_name = app_name;
+        existing_rule.app_identifier = app_identifier;
+        existing_rule.prompt_id = prompt_id;
+        existing_rule.enabled = enabled;
+        settings::write_settings(&app, settings);
+        Ok(())
+    } else {
+        Err(format!("Transform app rule with id '{}' not found", id))
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn delete_transform_app_rule(app: AppHandle, id: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    let original_len = settings.transform_app_rules.len();
+    settings.transform_app_rules.retain(|r| r.id != id);
+
+    if settings.transform_app_rules.len() == original_len {
+        return Err(format!("Transform app rule with id '{}' not found", id));
+    }
+
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_running_applications() -> Vec<crate::context::AppInfo> {
+    crate::context::list_running_applications()
 }
 
 #[tauri::command]
@@ -1553,6 +2178,10 @@ pub async fn get_available_accelerators(
 
 #[cfg(test)]
 mod tests {
+    use super::{enabled_startup_bindings, find_conflicting_binding, shortcuts_conflict};
+    use crate::settings::{
+        get_default_settings, transform_prompt_binding_id, KeyboardImplementation, ShortcutBinding,
+    };
     use handy_keys::Hotkey;
     use tauri_plugin_global_shortcut::Shortcut;
 
@@ -1569,5 +2198,107 @@ mod tests {
             assert!(key.parse::<Shortcut>().is_ok(), "Tauri rejected {key}");
             assert!(key.parse::<Hotkey>().is_ok(), "HandyKeys rejected {key}");
         }
+    }
+
+    #[test]
+    fn shortcuts_conflict_normalizes_combos_and_detects_duplicates() {
+        assert!(shortcuts_conflict(
+            "option+shift+a",
+            "shift+option+a",
+            KeyboardImplementation::HandyKeys
+        ));
+        assert!(shortcuts_conflict(
+            "ctrl+shift+k",
+            "Shift+Ctrl+K",
+            KeyboardImplementation::Tauri
+        ));
+        assert!(!shortcuts_conflict(
+            "ctrl+shift+k",
+            "ctrl+shift+j",
+            KeyboardImplementation::Tauri
+        ));
+    }
+
+    #[test]
+    fn find_conflicting_binding_checks_active_and_transform_siblings_only() {
+        let mut settings = get_default_settings();
+        settings.keyboard_implementation = KeyboardImplementation::Tauri;
+        settings.post_process_enabled = false;
+        settings.transform_enabled = false;
+
+        let prompt_a_id = transform_prompt_binding_id("default_style_casual");
+        let prompt_b_id = transform_prompt_binding_id("default_style_notes");
+        settings.bindings.insert(
+            prompt_a_id.clone(),
+            ShortcutBinding {
+                id: prompt_a_id.clone(),
+                name: "Casual & Concise".to_string(),
+                description: "prompt a".to_string(),
+                default_binding: String::new(),
+                current_binding: "ctrl+shift+1".to_string(),
+            },
+        );
+
+        let transcribe_shortcut = settings.bindings["transcribe"].current_binding.clone();
+        let transform_shortcut = settings.bindings["transform_text"].current_binding.clone();
+        let disabled_pp_shortcut = settings.bindings["transcribe_with_post_process"]
+            .current_binding
+            .clone();
+
+        // Conflicts against always-active transcribe shortcut.
+        assert_eq!(
+            find_conflicting_binding(&settings, &prompt_b_id, &transcribe_shortcut)
+                .map(|b| b.id.as_str()),
+            Some("transcribe")
+        );
+        // Conflicts against primary transform_text even while transform_enabled is false.
+        assert_eq!(
+            find_conflicting_binding(&settings, &prompt_b_id, &transform_shortcut)
+                .map(|b| b.id.as_str()),
+            Some("transform_text")
+        );
+        // Conflicts against sibling prompt shortcut.
+        assert_eq!(
+            find_conflicting_binding(&settings, &prompt_b_id, "shift+ctrl+1")
+                .map(|b| b.id.as_str()),
+            Some(prompt_a_id.as_str())
+        );
+        // Self-update with the same shortcut does not conflict with itself.
+        assert!(find_conflicting_binding(&settings, &prompt_a_id, "ctrl+shift+1").is_none());
+        // Disabled non-transform shortcut (post-process) is skipped.
+        assert!(find_conflicting_binding(&settings, &prompt_b_id, &disabled_pp_shortcut).is_none());
+    }
+
+    #[test]
+    fn enabled_startup_bindings_includes_prompt_shortcuts_only_when_transform_enabled() {
+        let mut settings = get_default_settings();
+        let prompt_binding_id = transform_prompt_binding_id("default_style_notes");
+        settings.bindings.insert(
+            prompt_binding_id.clone(),
+            ShortcutBinding {
+                id: prompt_binding_id.clone(),
+                name: "Structured Notes".to_string(),
+                description: "notes".to_string(),
+                default_binding: String::new(),
+                current_binding: "ctrl+shift+n".to_string(),
+            },
+        );
+
+        settings.transform_enabled = false;
+        let disabled_ids: Vec<_> = enabled_startup_bindings(&settings)
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        assert!(!disabled_ids.contains(&prompt_binding_id));
+        assert!(!disabled_ids.contains(&"transform_text".to_string()));
+        assert!(!disabled_ids.contains(&"cancel".to_string()));
+
+        settings.transform_enabled = true;
+        let enabled_ids: Vec<_> = enabled_startup_bindings(&settings)
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        assert!(enabled_ids.contains(&prompt_binding_id));
+        assert!(enabled_ids.contains(&"transform_text".to_string()));
     }
 }

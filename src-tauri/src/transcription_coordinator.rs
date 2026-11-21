@@ -1,4 +1,4 @@
-use crate::actions::ACTION_MAP;
+use crate::actions::get_action;
 use crate::managers::audio::AudioRecordingManager;
 use crate::settings::ShortcutActivation;
 use log::{debug, error, warn};
@@ -154,6 +154,18 @@ enum Stage {
     Idle,
     Recording(String), // binding_id
     Processing,
+}
+
+/// Outcome of executing a start effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartOutcome {
+    /// Microphone recording began normally.
+    Recording,
+    /// The action started asynchronous processing without opening the microphone
+    /// (e.g. an instant selection transform).
+    Processing,
+    /// Nothing started (for example microphone permission denied or missing text).
+    NotStarted,
 }
 
 /// A keyboard/signal edge for a transcribe binding.
@@ -531,11 +543,23 @@ impl CoordinatorState {
     }
 
     /// Reconcile the optimistic `Stage::Recording` after the executor reports
-    /// whether recording actually began (microphone access can be denied).
-    fn on_start_result(&mut self, binding_id: &str, started: bool) {
-        if !started && matches!(&self.stage, Stage::Recording(id) if id == binding_id) {
-            self.stage = Stage::Idle;
-            self.hold = None;
+    /// what the start action actually began.
+    fn on_start_result(&mut self, binding_id: &str, outcome: StartOutcome) {
+        if !matches!(&self.stage, Stage::Recording(id) if id == binding_id) {
+            return;
+        }
+        match outcome {
+            StartOutcome::Recording => {}
+            StartOutcome::Processing => {
+                self.stage = Stage::Processing;
+                self.hold = None;
+                self.pending_release = None;
+            }
+            StartOutcome::NotStarted => {
+                self.stage = Stage::Idle;
+                self.hold = None;
+                self.pending_release = None;
+            }
         }
     }
 
@@ -577,7 +601,9 @@ pub struct TranscriptionCoordinator {
 }
 
 pub fn is_transcribe_binding(id: &str) -> bool {
-    id == "transcribe" || id == "transcribe_with_post_process"
+    id == "transcribe"
+        || id == "transcribe_with_post_process"
+        || crate::settings::is_transform_binding(id)
 }
 
 impl TranscriptionCoordinator {
@@ -738,9 +764,9 @@ fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
             binding_id,
             hotkey_string,
         } => {
-            let started = start(app, &binding_id, &hotkey_string);
-            state.on_start_result(&binding_id, started);
-            if started {
+            let outcome = start(app, &binding_id, &hotkey_string);
+            state.on_start_result(&binding_id, outcome);
+            if outcome == StartOutcome::Recording {
                 emit_recording_phase(app, RecordingPhase::Started);
             }
         }
@@ -754,25 +780,33 @@ fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
     }
 }
 
-/// Execute a start effect; returns whether recording actually began, so the
-/// state machine can roll back its optimistic transition on failure.
-fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
-    let Some(action) = ACTION_MAP.get(binding_id) else {
+/// Execute a start effect; reports whether recording or immediate processing
+/// began, so the state machine can reconcile its optimistic transition.
+fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> StartOutcome {
+    let Some(action) = get_action(binding_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
-        return false;
+        return StartOutcome::NotStarted;
     };
+    let before_seq = crate::actions::instant_transform_seq();
     action.start(app, binding_id, hotkey_string);
+    if crate::actions::instant_transform_seq() != before_seq
+        || crate::actions::is_instant_transform_active()
+    {
+        return StartOutcome::Processing;
+    }
     let recording = app
         .try_state::<Arc<AudioRecordingManager>>()
         .is_some_and(|a| a.is_recording());
-    if !recording {
+    if recording {
+        StartOutcome::Recording
+    } else {
         debug!("Start for '{binding_id}' did not begin recording; staying idle");
+        StartOutcome::NotStarted
     }
-    recording
 }
 
 fn stop(app: &AppHandle, binding_id: &str, hotkey_string: &str) {
-    let Some(action) = ACTION_MAP.get(binding_id) else {
+    let Some(action) = get_action(binding_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return;
     };
@@ -1274,7 +1308,26 @@ mod tests {
         let effect = state.on_input(ptt_input(true), Instant::now());
         assert!(matches!(effect, Some(Effect::Start { .. })));
 
-        state.on_start_result(BINDING, false);
+        state.on_start_result(BINDING, StartOutcome::NotStarted);
+        assert_eq!(state.stage, Stage::Idle);
+    }
+
+    #[test]
+    fn instant_processing_start_transitions_to_processing_and_drains() {
+        let mut state = CoordinatorState::new();
+
+        let effect = state.on_input(ptt_input(true), Instant::now());
+        assert!(matches!(effect, Some(Effect::Start { .. })));
+
+        state.on_start_result(BINDING, StartOutcome::Processing);
+        assert_eq!(state.stage, Stage::Processing);
+        assert!(state.hold.is_none());
+
+        // Releasing the hotkey after instant transform began must not cancel or stop it.
+        assert!(state.on_input(ptt_input(false), Instant::now()).is_none());
+        assert_eq!(state.stage, Stage::Processing);
+
+        assert!(state.on_processing_finished().is_none());
         assert_eq!(state.stage, Stage::Idle);
     }
 
@@ -1733,5 +1786,13 @@ mod tests {
             "held 400ms since the real key-down: must stop, not lock"
         );
         assert_eq!(state.stage, Stage::Processing);
+    }
+
+    #[test]
+    fn is_transcribe_binding_recognizes_per_prompt_transform_bindings() {
+        assert!(is_transcribe_binding("transform_text"));
+        assert!(is_transcribe_binding("transform_prompt:custom_1"));
+        assert!(!is_transcribe_binding("transform_prompt:"));
+        assert!(!is_transcribe_binding("cancel"));
     }
 }

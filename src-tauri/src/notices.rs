@@ -49,6 +49,8 @@ pub enum NoticeCode {
     ModelLoadFailed,
     NoModelSelected,
     PostProcessFailed,
+    NoSelectedText,
+    TransformFailed,
     FileTranscriptionFailed,
     FilePostProcessFailed,
 }
@@ -65,6 +67,8 @@ impl NoticeCode {
             | Self::RecordingFailed
             | Self::ModelLoadFailed
             | Self::NoModelSelected
+            | Self::NoSelectedText
+            | Self::TransformFailed
             | Self::FileTranscriptionFailed => NoticeLevel::Error,
             Self::PostProcessFailed | Self::FilePostProcessFailed => NoticeLevel::Warning,
         }
@@ -83,6 +87,8 @@ impl NoticeCode {
             Self::ModelLoadFailed => &strings.model_load_failed_title,
             Self::NoModelSelected => &strings.no_model_selected_title,
             Self::PostProcessFailed => &strings.post_process_failed_title,
+            Self::NoSelectedText => &strings.no_selected_text_title,
+            Self::TransformFailed => &strings.transform_failed_title,
             Self::FileTranscriptionFailed => &strings.file_transcription_failed_title,
             Self::FilePostProcessFailed => &strings.file_post_process_failed_title,
         }

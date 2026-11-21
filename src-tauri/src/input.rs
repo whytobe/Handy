@@ -12,9 +12,10 @@ mod macos {
     type CfDataRef = *const c_void;
     type CfStringRef = *const c_void;
 
-    // kVK_ANSI_V. This is the behavior Handy used before layout-aware
-    // resolution and remains the safest fallback if macOS cannot expose the
-    // active layout.
+    // kVK_ANSI_C / kVK_ANSI_V. This is the behavior Handy used before
+    // layout-aware resolution and remains the safest fallback if macOS cannot
+    // expose the active layout.
+    const ANSI_C_KEYCODE: u16 = 8;
     const ANSI_V_KEYCODE: u16 = 9;
     const KEYCODE_COUNT: u16 = 128;
     const UC_KEY_ACTION_DISPLAY: u16 = 3;
@@ -68,13 +69,14 @@ mod macos {
         (0..KEYCODE_COUNT).find(|&keycode| matches(keycode))
     }
 
-    /// Resolves the physical key that macOS interprets as `v` while Command is
-    /// held. Including Command is important: non-Latin layouts commonly map
-    /// Cmd shortcuts to their ANSI equivalents, while standard Dvorak does not.
+    /// Resolves the physical key that macOS interprets as `target` (e.g. `b'v'`
+    /// or `b'c'`) while Command is held. Including Command is important:
+    /// non-Latin layouts commonly map Cmd shortcuts to their ANSI equivalents,
+    /// while standard Dvorak does not.
     ///
-    /// TIS APIs must run on the main thread; paste reaches this via
-    /// `clipboard::with_enigo`, which hops there.
-    fn resolve_command_v_keycode() -> Result<u16, String> {
+    /// TIS APIs must run on the main thread; paste and copy reach this via
+    /// main-thread dispatch.
+    fn resolve_command_keycode(target: u8) -> Result<u16, String> {
         // SAFETY: This function is called on the macOS main thread. The returned
         // source follows the Create Rule and is released by InputSource::drop.
         let source = InputSource(unsafe { TISCopyCurrentKeyboardLayoutInputSource() });
@@ -123,15 +125,20 @@ mod macos {
                 )
             };
 
-            status == 0 && length == 1 && chars[0] == u16::from(b'v')
+            status == 0 && length == 1 && chars[0] == u16::from(target)
         })
-        .ok_or_else(|| "could not map Cmd+V in the current macOS keyboard layout".to_string())?;
+        .ok_or_else(|| {
+            format!(
+                "could not map Cmd+{} in the current macOS keyboard layout",
+                char::from(target).to_ascii_uppercase()
+            )
+        })?;
 
         Ok(keycode)
     }
 
     pub(super) fn command_v_key() -> Key {
-        match resolve_command_v_keycode() {
+        match resolve_command_keycode(b'v') {
             Ok(keycode) => {
                 debug!("Resolved Cmd+V for the active macOS layout to keycode {keycode}");
                 Key::Other(u32::from(keycode))
@@ -144,6 +151,28 @@ mod macos {
             }
         }
     }
+
+    pub(super) fn command_c_keycode() -> u16 {
+        match resolve_command_keycode(b'c') {
+            Ok(keycode) => {
+                debug!("Resolved Cmd+C for the active macOS layout to keycode {keycode}");
+                keycode
+            }
+            Err(error) => {
+                warn!(
+                    "Could not resolve Cmd+C for the active macOS layout ({error}); using ANSI C keycode {ANSI_C_KEYCODE}"
+                );
+                ANSI_C_KEYCODE
+            }
+        }
+    }
+}
+
+/// Resolves the macOS virtual keycode for `Cmd+C` on the active layout.
+/// Must be called on the macOS main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn command_c_keycode() -> u16 {
+    macos::command_c_keycode()
 }
 
 /// Wrapper for Enigo to store in Tauri's managed state.

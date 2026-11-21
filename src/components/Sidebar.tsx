@@ -1,6 +1,14 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
-import { Cog, FlaskConical, History, Info, Sparkles, Cpu } from "lucide-react";
+import {
+  Cog,
+  FlaskConical,
+  History,
+  Info,
+  Sparkles,
+  Cpu,
+  Wand2,
+} from "lucide-react";
 import HandyTextLogo from "./icons/HandyTextLogo";
 import HandyHand from "./icons/HandyHand";
 import { useSettings } from "../hooks/useSettings";
@@ -10,6 +18,7 @@ import {
   HistorySettings,
   AboutSettings,
   PostProcessingSettings,
+  TransformSettings,
   ModelsSettings,
 } from "./settings";
 
@@ -56,6 +65,12 @@ export const SECTIONS_CONFIG = {
     component: AdvancedSettings,
     enabled: () => true,
   },
+  transform: {
+    labelKey: "sidebar.transform",
+    icon: Wand2,
+    component: TransformSettings,
+    enabled: () => true,
+  },
   postprocessing: {
     labelKey: "sidebar.postProcessing",
     icon: Sparkles,
@@ -93,9 +108,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     .map(([id, config]) => ({ id: id as SidebarSection, ...config }));
 
   return (
-    <div className="flex flex-col w-40 h-full border-e border-line items-center px-2">
+    <div className="flex flex-col w-fit min-w-40 max-w-56 shrink-0 h-full border-e border-line items-center px-2">
       <HandyTextLogo width={120} className="m-4" />
-      <div className="flex flex-col w-full items-center gap-1 pt-2 border-t border-line">
+      <div className="flex flex-col w-full min-w-0 items-center gap-1 pt-2 border-t border-line">
         {availableSections.map((section) => {
           const Icon = section.icon;
           const isActive = activeSection === section.id;
@@ -103,7 +118,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           return (
             <div
               key={section.id}
-              className={`flex gap-2 items-center p-2 w-full rounded-lg cursor-pointer transition-colors ${
+              className={`flex gap-2 items-center px-2.5 py-2 w-full min-w-0 rounded-lg cursor-pointer transition-colors ${
                 isActive
                   ? "bg-logo-primary/80"
                   : "hover:bg-line hover:opacity-100 opacity-85"
@@ -112,7 +127,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             >
               <Icon width={24} height={24} className="shrink-0" />
               <p
-                className="text-sm font-medium truncate"
+                className="text-sm font-medium truncate min-w-0"
                 title={t(section.labelKey)}
               >
                 {t(section.labelKey)}

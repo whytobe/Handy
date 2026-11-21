@@ -686,6 +686,68 @@ pub async fn fetch_models(
     Ok(models)
 }
 
+fn strip_invisible_and_think(raw: &str) -> String {
+    let cleaned = raw.replace(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'], "");
+    let trimmed = cleaned.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<think>") {
+        if let Some(end) = rest.find("</think>") {
+            return rest[end + "</think>".len()..].trim().to_string();
+        }
+    }
+    cleaned.trim().to_string()
+}
+
+pub(crate) fn clean_and_preview_response(raw: &str, max_chars: usize) -> Option<String> {
+    let cleaned = strip_invisible_and_think(raw);
+    if cleaned.is_empty() {
+        return None;
+    }
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = collapsed.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        Some(format!("{}...", preview.trim_end()))
+    } else {
+        Some(preview)
+    }
+}
+
+/// Send a minimal prompt to verify endpoint reachability, credentials, and model response.
+pub async fn test_model(
+    provider: &PostProcessProvider,
+    api_key: String,
+    model: &str,
+    disable_reasoning: bool,
+) -> Result<String, String> {
+    if provider.base_url.trim().is_empty() {
+        return Err("Base URL is required before testing.".to_string());
+    }
+    let model = model.trim();
+    if model.is_empty() {
+        return Err("Please enter or select a model name before testing.".to_string());
+    }
+
+    let raw = tokio::time::timeout(
+        Duration::from_secs(20),
+        send_chat_completion(
+            provider,
+            api_key,
+            model,
+            "Reply with OK.".to_string(),
+            disable_reasoning,
+        ),
+    )
+    .await
+    .map_err(|_| "Connection test timed out after 20 seconds.".to_string())??;
+
+    let Some(content) = raw else {
+        return Err("The model returned no choices or content.".to_string());
+    };
+
+    clean_and_preview_response(&content, 120)
+        .ok_or_else(|| "The model returned an empty response.".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,5 +1059,68 @@ mod tests {
         )
         .await;
         assert!(result.unwrap_err().contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_model_succeeds_for_openai_and_strips_think_block() {
+        let base_url = serve_one_response(
+            "200 OK",
+            r#"{"choices":[{"message":{"content":"<think>reasoning</think>\n  OK  "}}]}"#,
+        )
+        .await;
+        let result = test_model(
+            &provider("custom", &base_url),
+            "key".to_string(),
+            "my-model",
+            true,
+        )
+        .await;
+        assert_eq!(result, Ok("OK".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_model_succeeds_for_anthropic_format() {
+        let base_url = serve_one_response(
+            "200 OK",
+            r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"OK from Claude"}]}"#,
+        )
+        .await;
+        let result = test_model(
+            &anthropic_format_provider(&base_url),
+            "key".to_string(),
+            "claude-haiku",
+            true,
+        )
+        .await;
+        assert_eq!(result, Ok("OK from Claude".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_model_propagates_http_errors_and_validates_inputs() {
+        let empty_url_err = test_model(&provider("custom", "  "), String::new(), "m", true)
+            .await
+            .unwrap_err();
+        assert!(empty_url_err.contains("Base URL"));
+
+        let empty_model_err = test_model(
+            &provider("custom", "http://localhost"),
+            String::new(),
+            " ",
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(empty_model_err.contains("model name"));
+
+        let base_url = serve_one_response("404 Not Found", r#"{"error":"model not found"}"#).await;
+        let http_err = test_model(
+            &provider("custom", &base_url),
+            String::new(),
+            "missing-model",
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(http_err.contains("404"));
     }
 }

@@ -211,6 +211,11 @@ pub(crate) fn try_reliable_paste(
     )
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn flush_pending_macos(app_handle: &tauri::AppHandle) {
+    macos::flush_pending_on_main(app_handle);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

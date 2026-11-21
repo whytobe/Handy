@@ -7,6 +7,7 @@ import type {
   PostProcessApiFormat,
   ChineseScript,
   TranscribeAcceleratorSetting,
+  TransformMode,
   ShortcutActivation,
   VadBackend,
   LanguageDetectionMode,
@@ -23,6 +24,7 @@ interface SettingsStore {
   outputDevices: AudioDevice[];
   customSounds: { start: boolean; stop: boolean };
   postProcessModelOptions: Record<string, string[]>;
+  postProcessModelsError: Record<string, string | null>;
   // null until loadUpdateChecksLocked() resolves
   updateChecksLocked: boolean | null;
 
@@ -166,6 +168,18 @@ const settingUpdaters: {
     commands.changePostProcessEnabledSetting(value as boolean),
   post_process_selected_prompt_id: (value) =>
     commands.setPostProcessSelectedPrompt(value as string),
+  transform_enabled: (value) =>
+    commands.changeTransformEnabledSetting(value as boolean),
+  transform_mode: (value) =>
+    commands.changeTransformModeSetting(value as TransformMode),
+  transform_clipboard_fallback: (value) =>
+    commands.changeTransformClipboardFallbackSetting(value as boolean),
+  transform_selected_prompt_id: (value) =>
+    commands.setTransformSelectedPrompt(value as string),
+  transform_default_dictation_prompt_id: (value) =>
+    commands.setTransformDefaultDictationPrompt(
+      (value as string | null) ?? null,
+    ),
   mute_while_recording: (value) =>
     commands.changeMuteWhileRecordingSetting(value as boolean),
   append_trailing_space: (value) =>
@@ -229,6 +243,7 @@ export const useSettingsStore = create<SettingsStore>()(
     outputDevices: [],
     customSounds: { start: false, stop: false },
     postProcessModelOptions: {},
+    postProcessModelsError: {},
     updateChecksLocked: null,
 
     // Internal setters
@@ -379,26 +394,34 @@ export const useSettingsStore = create<SettingsStore>()(
     updateBinding: async (id, binding) => {
       const { settings, setUpdating } = get();
       const updateKey = `binding_${id}`;
-      const originalBinding = settings?.bindings?.[id]?.current_binding;
+      const originalBindingObj = settings?.bindings?.[id];
 
       setUpdating(updateKey, true);
 
       try {
-        // Optimistic update
-        set((state) => ({
-          settings: state.settings
-            ? {
-                ...state.settings,
-                bindings: {
-                  ...state.settings.bindings,
-                  [id]: {
-                    ...state.settings.bindings?.[id]!,
-                    current_binding: binding,
-                  },
+        // Optimistic update (synthesizing a placeholder for dynamic bindings)
+        set((state) => {
+          if (!state.settings) return { settings: null };
+          const baseBinding = originalBindingObj ?? {
+            id,
+            name: id,
+            description: "",
+            default_binding: "",
+            current_binding: "",
+          };
+          return {
+            settings: {
+              ...state.settings,
+              bindings: {
+                ...state.settings.bindings,
+                [id]: {
+                  ...baseBinding,
+                  current_binding: binding,
                 },
-              }
-            : null,
-        }));
+              },
+            },
+          };
+        });
 
         const result = await commands.changeBinding(id, binding);
 
@@ -411,25 +434,48 @@ export const useSettingsStore = create<SettingsStore>()(
         if (!result.data.success) {
           throw new Error(result.data.error || "Failed to update binding");
         }
-      } catch (error) {
-        console.error(`Failed to update binding ${id}:`, error);
 
-        // Rollback on error
-        if (originalBinding && get().settings) {
+        const savedBinding = result.data.binding;
+        if (savedBinding) {
           set((state) => ({
             settings: state.settings
               ? {
                   ...state.settings,
                   bindings: {
                     ...state.settings.bindings,
-                    [id]: {
-                      ...state.settings.bindings?.[id]!,
-                      current_binding: originalBinding,
-                    },
+                    [id]: savedBinding,
                   },
                 }
               : null,
           }));
+        }
+      } catch (error) {
+        console.error(`Failed to update binding ${id}:`, error);
+
+        // Rollback on error
+        if (get().settings) {
+          set((state) => {
+            if (!state.settings) return { settings: null };
+            if (originalBindingObj) {
+              return {
+                settings: {
+                  ...state.settings,
+                  bindings: {
+                    ...state.settings.bindings,
+                    [id]: originalBindingObj,
+                  },
+                },
+              };
+            }
+            const nextBindings = { ...state.settings.bindings };
+            delete nextBindings[id];
+            return {
+              settings: {
+                ...state.settings,
+                bindings: nextBindings,
+              },
+            };
+          });
         }
 
         // Re-throw to let the caller know it failed
@@ -476,9 +522,18 @@ export const useSettingsStore = create<SettingsStore>()(
         }));
       }
 
-      // Clear cached model options for the new provider so the dropdown
+      // Clear cached model options and fetch errors for the new provider so the dropdown
       // doesn't show stale models from a previous fetch or base_url.
-      setPostProcessModelOptions(providerId, []);
+      set((state) => ({
+        postProcessModelOptions: {
+          ...state.postProcessModelOptions,
+          [providerId]: [],
+        },
+        postProcessModelsError: {
+          ...state.postProcessModelsError,
+          [providerId]: null,
+        },
+      }));
 
       try {
         await commands.setPostProcessProvider(providerId);
@@ -556,11 +611,15 @@ export const useSettingsStore = create<SettingsStore>()(
           return;
         }
 
-        // Clear cached model options only after both backend writes succeed.
+        // Clear cached model options and fetch errors only after both backend writes succeed.
         set((state) => ({
           postProcessModelOptions: {
             ...state.postProcessModelOptions,
             [providerId]: [],
+          },
+          postProcessModelsError: {
+            ...state.postProcessModelsError,
+            [providerId]: null,
           },
         }));
 
@@ -583,6 +642,10 @@ export const useSettingsStore = create<SettingsStore>()(
         postProcessModelOptions: {
           ...state.postProcessModelOptions,
           [providerId]: [],
+        },
+        postProcessModelsError: {
+          ...state.postProcessModelsError,
+          [providerId]: null,
         },
       }));
       setUpdating(updateKey, true);
@@ -611,6 +674,10 @@ export const useSettingsStore = create<SettingsStore>()(
           ...state.postProcessModelOptions,
           [providerId]: [],
         },
+        postProcessModelsError: {
+          ...state.postProcessModelsError,
+          [providerId]: null,
+        },
       }));
       return get().updatePostProcessSetting("api_key", providerId, apiKey);
     },
@@ -624,6 +691,12 @@ export const useSettingsStore = create<SettingsStore>()(
       const { setUpdating, setPostProcessModelOptions } = get();
 
       setUpdating(updateKey, true);
+      set((state) => ({
+        postProcessModelsError: {
+          ...state.postProcessModelsError,
+          [providerId]: null,
+        },
+      }));
 
       try {
         // Call Tauri backend command instead of fetch
@@ -633,10 +706,23 @@ export const useSettingsStore = create<SettingsStore>()(
           return result.data;
         } else {
           console.error("Failed to fetch models:", result.error);
+          set((state) => ({
+            postProcessModelsError: {
+              ...state.postProcessModelsError,
+              [providerId]: result.error,
+            },
+          }));
           return [];
         }
       } catch (error) {
         console.error("Failed to fetch models:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        set((state) => ({
+          postProcessModelsError: {
+            ...state.postProcessModelsError,
+            [providerId]: message,
+          },
+        }));
         // Don't cache empty array on error - let user retry
         return [];
       } finally {

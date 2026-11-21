@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useSettings } from "../../../hooks/useSettings";
+import { useSettingsStore } from "../../../stores/settingsStore";
 import {
   commands,
   type PostProcessApiFormat,
@@ -7,6 +8,18 @@ import {
 } from "@/bindings";
 import type { ModelOption } from "./types";
 import type { DropdownOption } from "../../ui/Dropdown";
+
+export type ModelTestStatus =
+  | { kind: "idle" }
+  | { kind: "testing" }
+  | { kind: "missing_model" }
+  | {
+      kind: "success";
+      model: string;
+      responsePreview: string;
+      latencyMs: number;
+    }
+  | { kind: "error"; message: string };
 
 type PostProcessProviderState = {
   providerOptions: DropdownOption[];
@@ -29,10 +42,15 @@ type PostProcessProviderState = {
   modelOptions: ModelOption[];
   isModelUpdating: boolean;
   isFetchingModels: boolean;
+  fetchModelsError: string | null;
+  testStatus: ModelTestStatus;
+  isTestingModel: boolean;
   handleProviderSelect: (providerId: string) => void;
   handleModelSelect: (value: string) => void;
   handleModelCreate: (value: string) => void;
+  handleModelDraftChange: (draft: string) => void;
   handleRefreshModels: () => void;
+  handleTestModel: () => Promise<void>;
 };
 
 const APPLE_PROVIDER_ID = "apple_intelligence";
@@ -48,6 +66,7 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     updatePostProcessModel,
     fetchPostProcessModels,
     postProcessModelOptions,
+    postProcessModelsError,
   } = useSettings();
 
   // Settings are guaranteed to have providers after migration
@@ -67,6 +86,23 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
   const isAppleProvider = selectedProvider?.id === APPLE_PROVIDER_ID;
   const [appleIntelligenceUnavailable, setAppleIntelligenceUnavailable] =
     useState(false);
+  const [testStatus, setTestStatus] = useState<ModelTestStatus>({
+    kind: "idle",
+  });
+  const modelDraftRef = useRef("");
+  const pendingWriteRef = useRef<Promise<unknown>>(Promise.resolve());
+  const testRequestIdRef = useRef(0);
+
+  const trackWrite = useCallback(<T>(work: () => Promise<T>): Promise<T> => {
+    const next = pendingWriteRef.current.then(work, work);
+    pendingWriteRef.current = next;
+    return next;
+  }, []);
+
+  const resetTestStatus = useCallback(() => {
+    testRequestIdRef.current += 1;
+    setTestStatus({ kind: "idle" });
+  }, []);
 
   // Use settings directly as single source of truth
   const baseUrl = selectedProvider?.base_url ?? "";
@@ -88,6 +124,9 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
 
       if (providerId === selectedProviderId) return;
 
+      modelDraftRef.current = "";
+      resetTestStatus();
+
       // Check Apple Intelligence availability before selecting
       if (providerId === APPLE_PROVIDER_ID) {
         const available = await commands.checkAppleIntelligenceAvailable();
@@ -98,7 +137,7 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
         }
       }
 
-      await setPostProcessProvider(providerId);
+      await trackWrite(() => setPostProcessProvider(providerId));
 
       // Auto-fetch available models for the new provider so the model dropdown
       // reflects what's actually valid. Without this, a stale model value from
@@ -118,6 +157,8 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     },
     [
       selectedProviderId,
+      resetTestStatus,
+      trackWrite,
       setPostProcessProvider,
       fetchPostProcessModels,
       providers,
@@ -132,59 +173,171 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
       }
       const trimmed = value.trim();
       if (trimmed && trimmed !== baseUrl) {
-        void updatePostProcessBaseUrl(selectedProvider.id, trimmed);
+        resetTestStatus();
+        void trackWrite(() =>
+          updatePostProcessBaseUrl(selectedProvider.id, trimmed),
+        );
       }
     },
-    [selectedProvider, baseUrl, updatePostProcessBaseUrl],
+    [
+      selectedProvider,
+      baseUrl,
+      resetTestStatus,
+      trackWrite,
+      updatePostProcessBaseUrl,
+    ],
   );
 
   const handleApiFormatChange = useCallback(
     (value: PostProcessApiFormat) => {
       if (value !== apiFormat) {
-        void updatePostProcessApiFormat(selectedProviderId, value);
+        resetTestStatus();
+        void trackWrite(() =>
+          updatePostProcessApiFormat(selectedProviderId, value),
+        );
       }
     },
-    [apiFormat, selectedProviderId, updatePostProcessApiFormat],
+    [
+      apiFormat,
+      selectedProviderId,
+      resetTestStatus,
+      trackWrite,
+      updatePostProcessApiFormat,
+    ],
   );
 
   const handleApiKeyChange = useCallback(
     (value: string) => {
       const trimmed = value.trim();
       if (trimmed !== apiKey) {
-        void updatePostProcessApiKey(selectedProviderId, trimmed);
+        resetTestStatus();
+        void trackWrite(() =>
+          updatePostProcessApiKey(selectedProviderId, trimmed),
+        );
       }
     },
-    [apiKey, selectedProviderId, updatePostProcessApiKey],
+    [
+      apiKey,
+      selectedProviderId,
+      resetTestStatus,
+      trackWrite,
+      updatePostProcessApiKey,
+    ],
   );
 
   const handleModelChange = useCallback(
     (value: string) => {
       const trimmed = value.trim();
       if (trimmed !== model) {
-        void updatePostProcessModel(selectedProviderId, trimmed);
+        resetTestStatus();
+        void trackWrite(() =>
+          updatePostProcessModel(selectedProviderId, trimmed),
+        );
       }
     },
-    [model, selectedProviderId, updatePostProcessModel],
+    [
+      model,
+      selectedProviderId,
+      resetTestStatus,
+      trackWrite,
+      updatePostProcessModel,
+    ],
   );
 
   const handleModelSelect = useCallback(
     (value: string) => {
-      void updatePostProcessModel(selectedProviderId, value.trim());
+      resetTestStatus();
+      void trackWrite(() =>
+        updatePostProcessModel(selectedProviderId, value.trim()),
+      );
     },
-    [selectedProviderId, updatePostProcessModel],
+    [selectedProviderId, resetTestStatus, trackWrite, updatePostProcessModel],
   );
 
   const handleModelCreate = useCallback(
     (value: string) => {
-      void updatePostProcessModel(selectedProviderId, value);
+      resetTestStatus();
+      void trackWrite(() =>
+        updatePostProcessModel(selectedProviderId, value.trim()),
+      );
     },
-    [selectedProviderId, updatePostProcessModel],
+    [selectedProviderId, resetTestStatus, trackWrite, updatePostProcessModel],
+  );
+
+  const handleModelDraftChange = useCallback(
+    (draft: string) => {
+      modelDraftRef.current = draft;
+      if (draft !== "") {
+        resetTestStatus();
+      }
+    },
+    [resetTestStatus],
   );
 
   const handleRefreshModels = useCallback(() => {
     if (isAppleProvider) return;
-    void fetchPostProcessModels(selectedProviderId);
+    void (async () => {
+      await pendingWriteRef.current;
+      await fetchPostProcessModels(selectedProviderId);
+    })();
   }, [fetchPostProcessModels, isAppleProvider, selectedProviderId]);
+
+  const handleTestModel = useCallback(async () => {
+    const requestId = ++testRequestIdRef.current;
+    setTestStatus({ kind: "testing" });
+
+    await pendingWriteRef.current;
+    if (testRequestIdRef.current !== requestId) return;
+
+    const latestModel = (
+      useSettingsStore.getState().settings?.post_process_models?.[
+        selectedProviderId
+      ] ?? model
+    ).trim();
+    const draft = modelDraftRef.current.trim();
+    const effectiveModel = draft || latestModel;
+
+    if (!isAppleProvider && !effectiveModel) {
+      setTestStatus({ kind: "missing_model" });
+      return;
+    }
+
+    if (draft && draft !== latestModel) {
+      modelDraftRef.current = "";
+      await trackWrite(() => updatePostProcessModel(selectedProviderId, draft));
+      if (testRequestIdRef.current !== requestId) return;
+    }
+
+    try {
+      const result = await commands.testPostProcessModel(
+        selectedProviderId,
+        effectiveModel || null,
+      );
+      if (testRequestIdRef.current !== requestId) return;
+      if (result.status === "ok") {
+        setTestStatus({
+          kind: "success",
+          model: result.data.model,
+          responsePreview: result.data.response_preview,
+          latencyMs: result.data.latency_ms,
+        });
+      } else {
+        setTestStatus({ kind: "error", message: result.error });
+      }
+    } catch (error) {
+      if (testRequestIdRef.current !== requestId) return;
+      setTestStatus({
+        kind: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [
+    isAppleProvider,
+    model,
+    selectedProviderId,
+    trackWrite,
+    updatePostProcessModel,
+  ]);
 
   const availableModelsRaw = postProcessModelOptions[selectedProviderId] || [];
 
@@ -227,6 +380,8 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
   );
 
   const isCustomProvider = selectedProvider?.id === "custom";
+  const fetchModelsError = postProcessModelsError[selectedProviderId] ?? null;
+  const isTestingModel = testStatus.kind === "testing";
 
   // No automatic fetching - user must click refresh button
 
@@ -251,9 +406,14 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     modelOptions,
     isModelUpdating,
     isFetchingModels,
+    fetchModelsError,
+    testStatus,
+    isTestingModel,
     handleProviderSelect,
     handleModelSelect,
     handleModelCreate,
+    handleModelDraftChange,
     handleRefreshModels,
+    handleTestModel,
   };
 };

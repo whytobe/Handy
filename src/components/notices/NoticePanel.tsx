@@ -152,7 +152,7 @@ export const NoticePanel: React.FC = () => {
       {/* Always mounted: a screen reader only announces changes to a live
           region that was already there. New toasts only: the open list is
           content to move through, not to read out. */}
-      <div role="status" aria-atomic="true" className="sr-only">
+      <div role="status" aria-atomic="true" className="sr-only top-0 start-0">
         {rows
           .filter(({ id }) => toasts.includes(id))
           .flatMap(({ title, explanation, detail }) => [

@@ -319,20 +319,23 @@ function App() {
     content = (
       <div
         dir={direction}
-        className="h-screen flex flex-col select-none cursor-default"
+        className="h-screen w-full flex flex-col overflow-hidden select-none cursor-default"
       >
         <ErrorBoundary context="What's New">
           <WhatsNewGate />
         </ErrorBoundary>
         {/* Main content area that takes remaining space */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 min-h-0 flex overflow-hidden">
           <Sidebar
             activeSection={currentSection}
             onSectionChange={setCurrentSection}
           />
           {/* Scrollable content area */}
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <div ref={settingsScrollRef} className="flex-1 overflow-y-auto">
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div
+              ref={settingsScrollRef}
+              className="relative flex-1 min-h-0 overflow-y-auto overscroll-contain"
+            >
               {/* Models fills the window: its table scrolls, not the page. */}
               <div
                 className={`flex flex-col items-center p-4 gap-4 ${currentSection === "models" ? "h-full" : ""}`}
